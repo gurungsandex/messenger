@@ -151,6 +151,34 @@ public static class LdapEscape
 }
 
 /// <summary>
+/// The default registration where no LDAPS connection has been configured.
+///
+/// <b>The LDAPS wire implementation is not yet written.</b> Phase 4 delivered the
+/// synchronisation engine, the reconciliation rules, and RFC-compliant escaping — all
+/// tested against <see cref="FakeDirectoryProvider"/> — but the actual
+/// <c>System.DirectoryServices.Protocols</c> binding still has to be built and verified
+/// against a real domain controller.
+///
+/// This type exists so that gap fails loudly and specifically at the point of use, rather
+/// than as a dependency-injection error at startup or, worse, a silent no-op sync that an
+/// administrator mistakes for success.
+/// </summary>
+public sealed class UnconfiguredDirectoryProvider : IDirectoryProvider
+{
+    private const string NotConfigured =
+        "No directory connection is configured. The LDAPS provider is not yet implemented; "
+        + "see docs/deployment.md for the current status of Active Directory integration.";
+
+    public Task<DirectoryDelta> GetChangesAsync(long sinceUsn, CancellationToken ct = default)
+        => throw new MessengerException(ErrorCode.DirectoryUnreachable, NotConfigured);
+
+    public Task<DirectoryProbeResult> ProbeAsync(CancellationToken ct = default)
+        => Task.FromResult(new DirectoryProbeResult(
+            CanConnect: false, CanRead: false, HasWriteAccess: false,
+            FailureCode: ErrorCode.DirectoryUnreachable, Detail: NotConfigured));
+}
+
+/// <summary>
 /// Scripted directory provider used by the sync tests. Real LDAPS lives behind the same
 /// interface; see the deployment guide for the service-account requirements.
 /// </summary>

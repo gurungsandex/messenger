@@ -198,15 +198,27 @@ public sealed class PostgresIntegrationTests : IAsyncLifetime
         _db.ChangeTracker.Clear();
     }
 
+    /// <summary>
+    /// Verification must survive a real database round trip.
+    ///
+    /// The change-tracker clear is the whole point: without it, EF's identity map hands back
+    /// the entity still holding its in-memory timestamp, so the chain verifies against
+    /// values that were never read from PostgreSQL. That masked a real defect — timestamps
+    /// were truncated from tick to microsecond resolution on write, breaking every hash.
+    /// </summary>
     [SkippableFact]
-    public async Task Audit_chain_verifies_on_postgres()
+    public async Task Audit_chain_verifies_after_a_real_database_round_trip()
     {
         Skip.If(ConnectionString is null, "MESSENGER_TEST_CONNECTION is not set.");
 
         for (int i = 0; i < 5; i++)
             await _audit.AppendAsync($"action.{i}", "success");
 
+        _db.ChangeTracker.Clear();
+
         Assert.True((await _audit.VerifyAsync()).IsValid);
+
+        _db.ChangeTracker.Clear();
 
         var entry = await _db.AuditLog.OrderBy(e => e.Id).Skip(2).FirstAsync();
         entry.Outcome = "denied";

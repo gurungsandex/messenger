@@ -20,6 +20,7 @@ public class MessengerDbContext(DbContextOptions<MessengerDbContext> options) : 
     public DbSet<Presence> Presences => Set<Presence>();
     public DbSet<AuditLogEntry> AuditLog => Set<AuditLogEntry>();
     public DbSet<AuditCheckpoint> AuditCheckpoints => Set<AuditCheckpoint>();
+    public DbSet<LicenseRecord> Licenses => Set<LicenseRecord>();
     public DbSet<ServerSetting> ServerSettings => Set<ServerSetting>();
 
     protected override void OnModelCreating(ModelBuilder b)
@@ -172,6 +173,15 @@ public class MessengerDbContext(DbContextOptions<MessengerDbContext> options) : 
             e.ToTable("audit_checkpoints");
             e.HasKey(x => x.Id);
             e.HasIndex(x => x.UpToAuditId);
+        });
+
+        b.Entity<LicenseRecord>(e =>
+        {
+            e.ToTable("licenses");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.RawDocument).IsRequired();
+            e.Property(x => x.LicenseId).IsRequired().HasMaxLength(128);
+            e.HasIndex(x => x.IsActive);
         });
 
         b.Entity<ServerSetting>(e =>

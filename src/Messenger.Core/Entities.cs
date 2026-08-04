@@ -324,6 +324,28 @@ public class AuditCheckpoint
     public string? AnchorReference { get; set; }
 }
 
+public class LicenseRecord
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    /// <summary>
+    /// The licence file exactly as supplied. Retained verbatim because re-verifying a
+    /// signature against a reserialised payload is a well-known source of intermittent
+    /// failures — any change in property order or whitespace invalidates a good licence.
+    /// </summary>
+    public string RawDocument { get; set; } = null!;
+
+    public string LicenseId { get; set; } = null!;
+    public string Customer { get; set; } = null!;
+    public DateTimeOffset NotBefore { get; set; }
+    public DateTimeOffset NotAfter { get; set; }
+    public bool IsActive { get; set; }
+    public DateTimeOffset InstalledAt { get; set; } = DateTimeOffset.UtcNow;
+    public Guid? InstalledBy { get; set; }
+    public DateTimeOffset? ActivatedAt { get; set; }
+    public DateTimeOffset? LastHeartbeatAt { get; set; }
+}
+
 public class ServerSetting
 {
     public string Key { get; set; } = null!;

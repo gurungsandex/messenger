@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Messenger.Core\Messenger.Core.csproj" />
     <ProjectReference Include="..\Messenger.Crypto\Messenger.Crypto.csproj" />
+    <ProjectReference Include="..\Messenger.Licensing\Messenger.Licensing.csproj" />
   </ItemGroup>
 
   <ItemGroup>

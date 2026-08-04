@@ -23,6 +23,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Messenger.Crypto.Tests", "t
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Messenger.Server.Tests", "tests\Messenger.Server.Tests\Messenger.Server.Tests.csproj", "{94842AA5-9116-455E-9C34-C9274F736DB6}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Messenger.Licensing", "src\Messenger.Licensing\Messenger.Licensing.csproj", "{8D86FD25-41B9-4360-9BEC-E88634F6E6D4}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -64,6 +66,10 @@ Global
 		{94842AA5-9116-455E-9C34-C9274F736DB6}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{94842AA5-9116-455E-9C34-C9274F736DB6}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{94842AA5-9116-455E-9C34-C9274F736DB6}.Release|Any CPU.Build.0 = Release|Any CPU
+		{8D86FD25-41B9-4360-9BEC-E88634F6E6D4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8D86FD25-41B9-4360-9BEC-E88634F6E6D4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8D86FD25-41B9-4360-9BEC-E88634F6E6D4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8D86FD25-41B9-4360-9BEC-E88634F6E6D4}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{2DCE27B5-FEAD-4E60-8CF7-F77687A01DF7} = {9C405588-41B8-40DB-B39D-2861FB6BC2ED}
@@ -74,5 +80,6 @@ Global
 		{92388CB6-6026-48EB-BEA2-D7E0333227C1} = {7B9F5B3C-9B49-4A7C-AFB4-84D3A207A0C8}
 		{18170D91-D119-40DE-B706-9B5BBD38FF67} = {7B9F5B3C-9B49-4A7C-AFB4-84D3A207A0C8}
 		{94842AA5-9116-455E-9C34-C9274F736DB6} = {7B9F5B3C-9B49-4A7C-AFB4-84D3A207A0C8}
+		{8D86FD25-41B9-4360-9BEC-E88634F6E6D4} = {9C405588-41B8-40DB-B39D-2861FB6BC2ED}
 	EndGlobalSection
 EndGlobal

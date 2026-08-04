@@ -1,6 +1,7 @@
 using Messenger.Contracts;
 using Messenger.Crypto;
 using Messenger.Data;
+using Messenger.Licensing;
 using Messenger.Server;
 using Microsoft.EntityFrameworkCore;
 
@@ -35,6 +36,22 @@ builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<MessageService>();
 builder.Services.AddScoped<GroupService>();
 builder.Services.AddScoped<FileTransferService>();
+builder.Services.AddScoped<DirectorySyncService>();
+
+// The LDAPS wire implementation is not yet written (see UnconfiguredDirectoryProvider).
+// Registering it explicitly means the sync endpoint returns AD-101 with a clear message
+// rather than failing at startup or silently reporting a successful no-op sync.
+builder.Services.AddSingleton<IDirectoryProvider, UnconfiguredDirectoryProvider>();
+builder.Services.AddScoped<LicenseEnforcementService>();
+builder.Services.AddScoped<AdminAuthFilter>();
+
+// The vendor public key is compiled in so licence validation is fully offline: a
+// customer's internal messaging must not stop because the vendor is unreachable.
+builder.Services.AddSingleton(sp => new LicenseValidator(
+    Convert.FromBase64String(builder.Configuration["Licensing:VendorPublicKey"]
+        ?? throw new InvalidOperationException(
+            $"{ErrorCode.ConfigurationInvalid}: 'Licensing:VendorPublicKey' is not configured.")),
+    sp.GetRequiredService<TimeProvider>()));
 builder.Services.AddSingleton<FileCipher>();
 builder.Services.AddSingleton<IMalwareScanner, NoOpMalwareScanner>();
 builder.Services.AddSingleton<IFileStore>(_ => new LocalFileStore(
@@ -48,10 +65,11 @@ var app = builder.Build();
 
 app.MapHealthChecks("/health/live");
 app.MapHub<ChatHub>("/hubs/chat");
+app.MapAdminApi();
 
 app.MapPost("/api/auth/login", async (
     LoginRequest request, AuthService auth, SessionService sessions,
-    HttpContext http, CancellationToken ct) =>
+    LicenseEnforcementService license, HttpContext http, CancellationToken ct) =>
 {
     var ip = http.Connection.RemoteIpAddress?.ToString();
     var result = await auth.AuthenticateAsync(request.Username, request.Password, ip, ct);
@@ -71,13 +89,27 @@ app.MapPost("/api/auth/login", async (
     }
 
     var user = result.User!;
+
+    // Licence limits are applied only after the credential check passes. Checking first
+    // would let an unauthenticated caller probe the deployment's seat and session usage.
+    SessionPolicy policy;
+    try
+    {
+        policy = await license.AuthoriseLoginAsync(user.Id, ct);
+    }
+    catch (MessengerException ex)
+    {
+        return Results.Json(new ErrorDto(ex.Code, ex.Message, null),
+            statusCode: StatusCodes.Status403Forbidden);
+    }
+
     var (token, session) = await sessions.CreateAsync(
         user, request.DeviceFingerprint, request.DeviceName, ip,
-        AuthMethod.Password, SessionPolicy.Default, ct);
+        AuthMethod.Password, policy, ct);
 
     return Results.Ok(new LoginResponse(
         token, user.Id, user.DisplayName, session.ExpiresAt,
-        SessionPolicy.Default.IdleTimeoutSeconds, user.MustChangePassword));
+        policy.IdleTimeoutSeconds, user.MustChangePassword));
 });
 
 app.MapPost("/api/auth/logout", async (

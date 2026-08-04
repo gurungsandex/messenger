@@ -41,8 +41,13 @@ public sealed class AuditService(MessengerDbContext db, IAuditSigningKeyProvider
             var prevHash = head?.EntryHash ?? AuditChain.GenesisHash;
             var nextId = (head?.Id ?? 0) + 1;
 
+            // Truncated to the storage resolution before hashing, so the value that is
+            // hashed is bit-identical to the value that comes back on verification. See
+            // AuditChain.TruncateToStorageResolution.
+            var occurredAt = AuditChain.TruncateToStorageResolution(DateTimeOffset.UtcNow);
+
             var data = new AuditEntryData(
-                nextId, DateTimeOffset.UtcNow, actorUserId, actorTier, actorIp,
+                nextId, occurredAt, actorUserId, actorTier, actorIp,
                 action, targetType, targetId, outcome, detailJson);
 
             var entry = new AuditLogEntry

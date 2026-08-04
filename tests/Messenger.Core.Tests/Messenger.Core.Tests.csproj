@@ -27,6 +27,7 @@
     <ProjectReference Include="..\..\src\Messenger.Core\Messenger.Core.csproj" />
     <ProjectReference Include="..\..\src\Messenger.Crypto\Messenger.Crypto.csproj" />
     <ProjectReference Include="..\..\src\Messenger.Data\Messenger.Data.csproj" />
+    <ProjectReference Include="..\..\src\Messenger.Licensing\Messenger.Licensing.csproj" />
   </ItemGroup>
 
 </Project>

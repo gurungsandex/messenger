@@ -1,6 +1,7 @@
 using Messenger.Core;
 using Messenger.Crypto;
 using Messenger.Data;
+using Messenger.Licensing;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 
@@ -31,6 +32,8 @@ public sealed class TestHarness : IDisposable
     public InMemoryFileStore Store { get; }
     public FakeDirectoryProvider Directory { get; }
     public DirectorySyncService DirectorySync { get; }
+    public LicenseEnforcementService License { get; }
+    public byte[] VendorPrivateKey { get; }
     public PasswordHasher Hasher { get; }
     public InMemoryAuditSigningKeyProvider SigningKeys { get; }
 
@@ -63,6 +66,10 @@ public sealed class TestHarness : IDisposable
         Files = new FileTransferService(Db, Store, KeyStore, new FileCipher(), Audit, scanner, Time);
         Directory = new FakeDirectoryProvider();
         DirectorySync = new DirectorySyncService(Db, Directory, Audit, Time);
+
+        var (vendorPrivate, vendorPublic) = LicenseDocument.GenerateVendorKeyPair();
+        VendorPrivateKey = vendorPrivate;
+        License = new LicenseEnforcementService(Db, new LicenseValidator(vendorPublic, Time), Audit, Time);
     }
 
     public User AddUser(string username, string? password = null, UserStatus status = UserStatus.Active)

@@ -34,6 +34,22 @@ public static class AuditChain
     /// <summary>The chain's starting value, used as prev_hash for the very first entry.</summary>
     public static readonly byte[] GenesisHash = new byte[32];
 
+    /// <summary>
+    /// Truncates a timestamp to whole microseconds.
+    ///
+    /// This is load-bearing, not cosmetic. .NET's <see cref="DateTimeOffset"/> has 100 ns
+    /// (tick) resolution; PostgreSQL's <c>timestamptz</c> has microsecond resolution. An
+    /// untruncated timestamp is therefore silently rounded on write, so the value read back
+    /// during verification differs from the value that was hashed — and the entire audit
+    /// chain fails to verify on the production database while passing on any store with
+    /// tick precision.
+    ///
+    /// Applying this before both hashing and storing makes the round trip lossless on any
+    /// backing store with at least microsecond resolution.
+    /// </summary>
+    public static DateTimeOffset TruncateToStorageResolution(DateTimeOffset value)
+        => new(value.Ticks - value.Ticks % 10, value.Offset);
+
     /// <summary>entry_hash = SHA-256( canonical_json(entry) ‖ prev_hash )</summary>
     public static byte[] ComputeEntryHash(AuditEntryData entry, byte[] previousHash)
     {
