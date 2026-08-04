@@ -1,0 +1,42 @@
+# Build output
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+publish/
+*.user
+*.suo
+
+# Test output
+TestResults/
+coverage/
+*.coverage
+*.trx
+
+# NuGet
+*.nupkg
+packages/
+.nuget/
+
+# WiX
+*.wixpdb
+*.wixobj
+
+# IDE
+.vs/
+.idea/
+*.DotSettings.user
+
+# Secrets and local config — never commit these
+appsettings.Development.json
+appsettings.Local.json
+*.pfx
+*.snk
+*.key
+*.pem
+secrets.json
+
+# OS
+Thumbs.db
+.DS_Store
