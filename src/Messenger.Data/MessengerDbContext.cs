@@ -6,6 +6,9 @@ namespace Messenger.Data;
 public class MessengerDbContext(DbContextOptions<MessengerDbContext> options) : DbContext(options)
 {
     public DbSet<User> Users => Set<User>();
+    public DbSet<Group> Groups => Set<Group>();
+    public DbSet<GroupMember> GroupMembers => Set<GroupMember>();
+    public DbSet<OrgUnit> OrgUnits => Set<OrgUnit>();
     public DbSet<Conversation> Conversations => Set<Conversation>();
     public DbSet<ConversationParticipant> ConversationParticipants => Set<ConversationParticipant>();
     public DbSet<Message> Messages => Set<Message>();
@@ -28,6 +31,34 @@ public class MessengerDbContext(DbContextOptions<MessengerDbContext> options) : 
             e.HasIndex(x => x.Username).IsUnique();
             e.HasIndex(x => x.AdObjectGuid).IsUnique().HasFilter("ad_object_guid IS NOT NULL");
             e.HasIndex(x => x.Status);
+        });
+
+        b.Entity<Group>(e =>
+        {
+            e.ToTable("groups");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Name).IsRequired().HasMaxLength(256);
+            e.HasIndex(x => x.Name).IsUnique().HasFilter("deleted_at IS NULL");
+            e.HasIndex(x => x.AdObjectGuid).IsUnique().HasFilter("ad_object_guid IS NOT NULL");
+            e.HasIndex(x => x.Status);
+        });
+
+        b.Entity<GroupMember>(e =>
+        {
+            e.ToTable("group_members");
+            e.HasKey(x => new { x.GroupId, x.UserId });
+            e.HasOne(x => x.Group).WithMany(g => g.Members).HasForeignKey(x => x.GroupId);
+            e.HasOne(x => x.User).WithMany().HasForeignKey(x => x.UserId);
+            e.HasIndex(x => x.UserId);
+        });
+
+        b.Entity<OrgUnit>(e =>
+        {
+            e.ToTable("org_units");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Name).IsRequired().HasMaxLength(256);
+            e.HasIndex(x => x.AdObjectGuid).IsUnique().HasFilter("ad_object_guid IS NOT NULL");
+            e.HasIndex(x => x.ParentId);
         });
 
         b.Entity<Conversation>(e =>

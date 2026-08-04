@@ -88,6 +88,17 @@ public sealed class MessageService(
             throw new MessengerException(ErrorCode.NotAConversationParticipant,
                 "You are not a participant in this conversation.");
 
+        // A deactivated group stops accepting messages, but its history stays readable and
+        // its membership intact, so reactivation loses nothing.
+        var owningGroupStatus = await db.Groups
+            .Where(g => g.ConversationId == request.ConversationId && g.DeletedAt == null)
+            .Select(g => (GroupStatus?)g.Status)
+            .FirstOrDefaultAsync(ct);
+
+        if (owningGroupStatus == GroupStatus.Disabled)
+            throw new MessengerException(ErrorCode.GroupDisabled,
+                "This group is deactivated and is not accepting messages.");
+
         // A retry carrying the same client id must return the original ack, not duplicate.
         var existing = await db.Messages.FirstOrDefaultAsync(
             m => m.ConversationId == request.ConversationId
@@ -149,12 +160,22 @@ public sealed class MessageService(
     public async Task<IReadOnlyList<MessageDto>> GetHistoryAsync(
         Guid userId, Guid conversationId, long afterSeq = 0, int limit = 50, CancellationToken ct = default)
     {
-        await EnsureParticipantAsync(userId, conversationId, ct);
+        var window = await RequireVisibilityWindowAsync(userId, conversationId, ct);
 
         limit = Math.Clamp(limit, 1, 200);
 
-        var messages = await db.Messages
-            .Where(m => m.ConversationId == conversationId && m.Seq > afterSeq)
+        // The visibility window is applied in the query, not filtered afterwards. A member
+        // added to a group today must not be able to page back into discussion that
+        // predates them, and a removed member must not see anything after they left.
+        var lowerBound = Math.Max(afterSeq, window.FromSeq - 1);
+
+        var query = db.Messages
+            .Where(m => m.ConversationId == conversationId && m.Seq > lowerBound);
+
+        if (window.ToSeq is { } upper)
+            query = query.Where(m => m.Seq <= upper);
+
+        var messages = await query
             .OrderBy(m => m.Seq)
             .Take(limit)
             .ToListAsync(ct);
@@ -325,12 +346,23 @@ public sealed class MessageService(
         return created;
     }
 
-    private async Task EnsureParticipantAsync(Guid userId, Guid conversationId, CancellationToken ct)
+    /// <summary>
+    /// The range of sequence numbers a user may read in a conversation. A departed member
+    /// still has a window — what they legitimately saw — so this deliberately does not
+    /// filter on <c>LeftAt == null</c>.
+    /// </summary>
+    private async Task<(long FromSeq, long? ToSeq)> RequireVisibilityWindowAsync(
+        Guid userId, Guid conversationId, CancellationToken ct)
     {
-        var isParticipant = await db.ConversationParticipants
-            .AnyAsync(p => p.ConversationId == conversationId && p.UserId == userId && p.LeftAt == null, ct);
-        if (!isParticipant)
+        var window = await db.ConversationParticipants
+            .Where(p => p.ConversationId == conversationId && p.UserId == userId)
+            .Select(p => new { p.VisibleFromSeq, p.VisibleToSeq })
+            .FirstOrDefaultAsync(ct);
+
+        if (window is null)
             throw new MessengerException(ErrorCode.NotAConversationParticipant,
                 "You are not a participant in this conversation.");
+
+        return (window.VisibleFromSeq, window.VisibleToSeq);
     }
 }

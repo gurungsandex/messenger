@@ -36,6 +36,9 @@ public static class ErrorCode
 
     // AUTH 4xx — account state
     public const string UserAlreadyExists = "AUTH-401";
+    public const string GroupAlreadyExists = "AUTH-404";
+    public const string GroupNotFound = "AUTH-405";
+    public const string GroupDisabled = "AUTH-406";
     public const string DirectoryOwnedAttribute = "AUTH-402";
     public const string SelfModificationRefused = "AUTH-403";
 

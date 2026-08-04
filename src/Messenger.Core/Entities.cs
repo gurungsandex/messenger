@@ -35,6 +35,62 @@ public class User
     public ICollection<ConversationParticipant> Participations { get; set; } = [];
 }
 
+public enum GroupType { Chat = 0, Security = 1, Distribution = 2 }
+
+public enum GroupStatus { Active = 0, Disabled = 1 }
+
+public class Group
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Name { get; set; } = null!;
+    public string? Description { get; set; }
+    public GroupType Type { get; set; } = GroupType.Chat;
+    public UserSource Source { get; set; } = UserSource.Local;
+    public Guid? AdObjectGuid { get; set; }
+    public string? AdDn { get; set; }
+    public Guid? ParentOrgUnitId { get; set; }
+    public GroupStatus Status { get; set; } = GroupStatus.Active;
+
+    /// <summary>
+    /// The chat conversation backing this group, created for <see cref="GroupType.Chat"/>.
+    /// Security and distribution groups synced from AD do not get one.
+    /// </summary>
+    public Guid? ConversationId { get; set; }
+
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public Guid? CreatedBy { get; set; }
+    public DateTimeOffset? UpdatedAt { get; set; }
+    public Guid? UpdatedBy { get; set; }
+    public DateTimeOffset? DeletedAt { get; set; }
+
+    public ICollection<GroupMember> Members { get; set; } = [];
+}
+
+public enum GroupMemberRole { Member = 0, Owner = 1 }
+
+public class GroupMember
+{
+    public Guid GroupId { get; set; }
+    public Group Group { get; set; } = null!;
+    public Guid UserId { get; set; }
+    public User User { get; set; } = null!;
+    public GroupMemberRole Role { get; set; } = GroupMemberRole.Member;
+    public DateTimeOffset AddedAt { get; set; } = DateTimeOffset.UtcNow;
+    public Guid? AddedBy { get; set; }
+}
+
+public class OrgUnit
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Name { get; set; } = null!;
+    public string? DistinguishedName { get; set; }
+    public Guid? ParentId { get; set; }
+    public UserSource Source { get; set; } = UserSource.Local;
+    public Guid? AdObjectGuid { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? DeletedAt { get; set; }
+}
+
 public class Conversation
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -74,6 +130,23 @@ public class ConversationParticipant
     public DateTimeOffset? LeftAt { get; set; }
     public long LastReadSeq { get; set; }
     public bool IsMuted { get; set; }
+
+    /// <summary>
+    /// First sequence number this participant may read. Set to the conversation's next seq
+    /// on join, so a new group member does not gain retroactive access to discussion that
+    /// happened before they were added.
+    ///
+    /// Zero means "from the beginning" and is used for the founding participants of a
+    /// conversation and for direct conversations.
+    /// </summary>
+    public long VisibleFromSeq { get; set; }
+
+    /// <summary>
+    /// Last sequence number this participant may read, set when they leave. Null while they
+    /// are still a member. A removed member keeps access to what they legitimately saw —
+    /// deleting it would destroy their own history — but gains nothing afterwards.
+    /// </summary>
+    public long? VisibleToSeq { get; set; }
 }
 
 public class Message

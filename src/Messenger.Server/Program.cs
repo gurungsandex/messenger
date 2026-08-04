@@ -33,6 +33,7 @@ builder.Services.AddScoped<AuditService>();
 builder.Services.AddScoped<SessionService>();
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<MessageService>();
+builder.Services.AddScoped<GroupService>();
 builder.Services.AddScoped<PresenceService>();
 
 builder.Services.AddHealthChecks();

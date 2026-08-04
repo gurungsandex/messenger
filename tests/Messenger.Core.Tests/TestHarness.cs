@@ -26,6 +26,7 @@ public sealed class TestHarness : IDisposable
     public AuthService Auth { get; }
     public AuditService Audit { get; }
     public PresenceService Presence { get; }
+    public GroupService Groups { get; }
     public PasswordHasher Hasher { get; }
     public InMemoryAuditSigningKeyProvider SigningKeys { get; }
 
@@ -53,6 +54,7 @@ public sealed class TestHarness : IDisposable
         Auth = new AuthService(Db, Hasher, Audit, Time);
         Messages = new MessageService(Db, KeyStore, new MessageCipher(), Time);
         Presence = new PresenceService(Db, Time);
+        Groups = new GroupService(Db, Audit, Time);
     }
 
     public User AddUser(string username, string? password = null, UserStatus status = UserStatus.Active)
