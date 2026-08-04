@@ -1,0 +1,103 @@
+namespace Messenger.Contracts;
+
+/// <summary>
+/// Stable error codes from docs/error-codes.md. Codes are permanent: a code is never
+/// reused for a different meaning and never renumbered.
+/// </summary>
+public static class ErrorCode
+{
+    // AUTH 1xx — credentials
+    public const string InvalidCredentials = "AUTH-101";
+    public const string AccountNotFound = "AUTH-102";
+    public const string AccountDisabled = "AUTH-103";
+    public const string AccountLocked = "AUTH-104";
+    public const string PasswordExpired = "AUTH-105";
+    public const string PasswordChangeRequired = "AUTH-106";
+    public const string PasswordPolicyRejected = "AUTH-107";
+    public const string PasswordReuseRejected = "AUTH-108";
+    public const string Argon2VerificationError = "AUTH-113";
+
+    // AUTH 2xx — sessions
+    public const string SessionExpiredIdle = "AUTH-201";
+    public const string SessionExpiredAbsolute = "AUTH-202";
+    public const string SessionRevokedByAdmin = "AUTH-203";
+    public const string SessionRevokedPasswordChange = "AUTH-204";
+    public const string SessionTokenInvalid = "AUTH-205";
+    public const string SessionDeviceMismatch = "AUTH-206";
+    public const string DeviceBlocked = "AUTH-207";
+    public const string ConcurrentSessionLimit = "AUTH-208";
+
+    // AUTH 3xx — authorization
+    public const string PermissionDenied = "AUTH-301";
+    public const string NotAConversationParticipant = "AUTH-302";
+    public const string CrossTierEscalationRefused = "AUTH-303";
+    public const string BuiltinRoleImmutable = "AUTH-304";
+    public const string LastAdminProtected = "AUTH-305";
+
+    // AUTH 4xx — account state
+    public const string UserAlreadyExists = "AUTH-401";
+    public const string DirectoryOwnedAttribute = "AUTH-402";
+    public const string SelfModificationRefused = "AUTH-403";
+
+    // NET 2xx — protocol
+    public const string ProtocolVersionUnsupported = "NET-201";
+    public const string MessageTooLarge = "NET-202";
+    public const string MalformedRequest = "NET-203";
+    public const string RateLimitExceeded = "NET-204";
+    public const string SendQueueOverflow = "NET-205";
+
+    // LIC 1xx
+    public const string LicenseSignatureInvalid = "LIC-101";
+    public const string LicenseExpired = "LIC-102";
+    public const string SeatLimitReached = "LIC-103";
+    public const string PerUserSessionLimit = "LIC-104";
+    public const string TotalSessionLimit = "LIC-105";
+    public const string LicenseNotYetValid = "LIC-106";
+    public const string FeatureNotLicensed = "LIC-107";
+    public const string NoLicenseInstalled = "LIC-108";
+    public const string LicenseRevoked = "LIC-109";
+    public const string GracePeriodExpired = "LIC-110";
+    public const string LicenseMalformed = "LIC-111";
+
+    // SRV 1xx — startup and configuration
+    public const string ServiceStartFailed = "SRV-101";
+    public const string ConfigurationInvalid = "SRV-102";
+    public const string ListenerPortUnavailable = "SRV-103";
+    public const string SchemaVersionMismatch = "SRV-104";
+
+    // SRV 2xx — dependencies and runtime
+    public const string DatabaseUnreachable = "SRV-201";
+    public const string DatabaseAuthFailed = "SRV-202";
+
+    // SRV 3xx — cryptography and data
+    public const string KeyStoreUnavailable = "SRV-301";
+    public const string KeyUnwrapFailed = "SRV-302";
+    public const string KeyRotationFailed = "SRV-303";
+    public const string MessageDecryptionFailed = "SRV-304";
+    public const string AuditChainVerificationFailed = "SRV-305";
+    public const string AuditCheckpointSigningFailed = "SRV-306";
+    public const string AuditWriteFailed = "SRV-307";
+    public const string ClockAnomalyDetected = "SRV-310";
+}
+
+/// <summary>
+/// An operation failure carrying a catalogue code. Thrown across service boundaries and
+/// mapped to a wire error by the hub/API layer.
+/// </summary>
+public sealed class MessengerException : Exception
+{
+    public string Code { get; }
+
+    /// <summary>
+    /// Detail intended for operators only. Never sent to an unauthenticated caller —
+    /// see the account-enumeration note in docs/error-codes.md.
+    /// </summary>
+    public string? OperatorDetail { get; }
+
+    public MessengerException(string code, string message, string? operatorDetail = null)
+        : base(message)
+    {
+        Code = code;
+        OperatorDetail = operatorDetail;
+    }
+}
