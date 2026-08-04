@@ -29,6 +29,8 @@ public sealed class TestHarness : IDisposable
     public GroupService Groups { get; }
     public FileTransferService Files { get; }
     public InMemoryFileStore Store { get; }
+    public FakeDirectoryProvider Directory { get; }
+    public DirectorySyncService DirectorySync { get; }
     public PasswordHasher Hasher { get; }
     public InMemoryAuditSigningKeyProvider SigningKeys { get; }
 
@@ -59,6 +61,8 @@ public sealed class TestHarness : IDisposable
         Groups = new GroupService(Db, Audit, Time);
         Store = new InMemoryFileStore();
         Files = new FileTransferService(Db, Store, KeyStore, new FileCipher(), Audit, scanner, Time);
+        Directory = new FakeDirectoryProvider();
+        DirectorySync = new DirectorySyncService(Db, Directory, Audit, Time);
     }
 
     public User AddUser(string username, string? password = null, UserStatus status = UserStatus.Active)

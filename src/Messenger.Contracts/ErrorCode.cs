@@ -62,6 +62,28 @@ public static class ErrorCode
     public const string GracePeriodExpired = "LIC-110";
     public const string LicenseMalformed = "LIC-111";
 
+    // AD 1xx — connection and binding
+    public const string DirectoryUnreachable = "AD-101";
+    public const string LdapsCertificateInvalid = "AD-102";
+    public const string DirectoryBindFailed = "AD-103";
+    public const string ClockSkewTooLarge = "AD-104";
+    public const string ServiceAccountLacksRead = "AD-105";
+    public const string ServiceAccountOverPrivileged = "AD-106";
+    public const string BaseDnNotFound = "AD-107";
+    public const string GmsaRetrievalFailed = "AD-108";
+    public const string ReferralChasingRefused = "AD-109";
+
+    // AD 2xx — synchronisation
+    public const string SyncFailed = "AD-201";
+    public const string SyncPartiallyCompleted = "AD-202";
+    public const string DuplicateObjectGuid = "AD-203";
+    public const string AttributeMappingError = "AD-204";
+    public const string SyncScopeTooLarge = "AD-205";
+    public const string InvalidLdapFilter = "AD-206";
+    public const string WatermarkLost = "AD-207";
+    public const string ObjectRemovedFromDirectory = "AD-208";
+    public const string SyncScheduleOverlap = "AD-209";
+
     // FILE 1xx — upload
     public const string FileTooLarge = "FILE-101";
     public const string FileTypeBlocked = "FILE-102";
