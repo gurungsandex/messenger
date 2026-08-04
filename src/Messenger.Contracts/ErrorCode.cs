@@ -62,6 +62,27 @@ public static class ErrorCode
     public const string GracePeriodExpired = "LIC-110";
     public const string LicenseMalformed = "LIC-111";
 
+    // FILE 1xx — upload
+    public const string FileTooLarge = "FILE-101";
+    public const string FileTypeBlocked = "FILE-102";
+    public const string QuotaExceeded = "FILE-103";
+    public const string StorageFull = "FILE-104";
+    public const string UploadSessionExpired = "FILE-105";
+    public const string FileIntegrityCheckFailed = "FILE-106";
+    public const string ChunkSequenceError = "FILE-107";
+    public const string UploadCancelled = "FILE-108";
+    public const string FileNameInvalid = "FILE-109";
+
+    // FILE 2xx — download and scanning
+    public const string FileNotFound = "FILE-201";
+    public const string FileAccessDenied = "FILE-202";
+    public const string ScanInProgress = "FILE-203";
+    public const string FileFailedMalwareScan = "FILE-204";
+    public const string ScannerUnavailable = "FILE-205";
+    public const string FileDecryptionFailed = "FILE-206";
+    public const string FileExpired = "FILE-207";
+    public const string ChunkManifestMismatch = "FILE-208";
+
     // SRV 1xx — startup and configuration
     public const string ServiceStartFailed = "SRV-101";
     public const string ConfigurationInvalid = "SRV-102";

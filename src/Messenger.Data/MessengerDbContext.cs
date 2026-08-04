@@ -14,6 +14,8 @@ public class MessengerDbContext(DbContextOptions<MessengerDbContext> options) : 
     public DbSet<Message> Messages => Set<Message>();
     public DbSet<MessageRecipient> MessageRecipients => Set<MessageRecipient>();
     public DbSet<ConversationKey> ConversationKeys => Set<ConversationKey>();
+    public DbSet<StoredFile> StoredFiles => Set<StoredFile>();
+    public DbSet<FileChunk> FileChunks => Set<FileChunk>();
     public DbSet<Session> Sessions => Set<Session>();
     public DbSet<Presence> Presences => Set<Presence>();
     public DbSet<AuditLogEntry> AuditLog => Set<AuditLogEntry>();
@@ -112,6 +114,28 @@ public class MessengerDbContext(DbContextOptions<MessengerDbContext> options) : 
             e.HasKey(x => x.Id);
             e.HasOne(x => x.Conversation).WithMany(c => c.Keys).HasForeignKey(x => x.ConversationId);
             e.HasIndex(x => new { x.ConversationId, x.Version }).IsUnique();
+        });
+
+        b.Entity<StoredFile>(e =>
+        {
+            e.ToTable("files");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.FileName).IsRequired().HasMaxLength(255);
+            e.Property(x => x.StorageKey).IsRequired().HasMaxLength(64);
+            e.Property(x => x.Sha256Plaintext).IsRequired().HasMaxLength(32);
+            e.Property(x => x.NoncePrefix).IsRequired().HasMaxLength(4);
+            e.HasIndex(x => x.StorageKey).IsUnique();
+            e.HasIndex(x => x.ConversationId);
+            e.HasIndex(x => new { x.UploaderId, x.DeletedAt });
+            e.HasIndex(x => x.UploadState);
+        });
+
+        b.Entity<FileChunk>(e =>
+        {
+            e.ToTable("file_chunks");
+            e.HasKey(x => new { x.FileId, x.ChunkIndex });
+            e.HasOne(x => x.File).WithMany(f => f.Chunks).HasForeignKey(x => x.FileId);
+            e.Property(x => x.AuthTag).IsRequired().HasMaxLength(16);
         });
 
         b.Entity<Session>(e =>

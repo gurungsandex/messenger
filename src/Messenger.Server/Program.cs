@@ -34,6 +34,12 @@ builder.Services.AddScoped<SessionService>();
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<MessageService>();
 builder.Services.AddScoped<GroupService>();
+builder.Services.AddScoped<FileTransferService>();
+builder.Services.AddSingleton<FileCipher>();
+builder.Services.AddSingleton<IMalwareScanner, NoOpMalwareScanner>();
+builder.Services.AddSingleton<IFileStore>(_ => new LocalFileStore(
+    builder.Configuration["FileStore:RootPath"]
+    ?? Path.Combine(AppContext.BaseDirectory, "filestore")));
 builder.Services.AddScoped<PresenceService>();
 
 builder.Services.AddHealthChecks();

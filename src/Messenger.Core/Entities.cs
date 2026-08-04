@@ -204,6 +204,65 @@ public class ConversationKey
     public long MessageCount { get; set; }
 }
 
+public enum UploadState { Pending = 0, Complete = 1, Failed = 2, Expired = 3 }
+
+public enum AvScanState { NotScanned = 0, Scanning = 1, Clean = 2, Infected = 3, Error = 4 }
+
+public class StoredFile
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ConversationId { get; set; }
+    public Guid? MessageId { get; set; }
+    public Guid UploaderId { get; set; }
+
+    /// <summary>Stored as supplied and never used to build a filesystem path.</summary>
+    public string FileName { get; set; } = null!;
+
+    /// <summary>Client-declared, treated as untrusted.</summary>
+    public string? ContentType { get; set; }
+
+    public long SizeBytes { get; set; }
+    public byte[] Sha256Plaintext { get; set; } = null!;
+
+    /// <summary>
+    /// Server-generated. The on-disk path derives only from this, so path traversal via a
+    /// crafted filename is structurally impossible rather than filtered.
+    /// </summary>
+    public string StorageKey { get; set; } = null!;
+
+    public byte[] WrappedDek { get; set; } = null!;
+    public string KekId { get; set; } = null!;
+    public int KeyVersion { get; set; } = 1;
+    public byte[] NoncePrefix { get; set; } = null!;
+
+    public int ChunkSize { get; set; }
+    public long ChunkCount { get; set; }
+
+    /// <summary>SHA-256 over the ordered chunk tags; detects reordering and truncation.</summary>
+    public byte[]? ChunkManifest { get; set; }
+
+    public UploadState UploadState { get; set; } = UploadState.Pending;
+    public AvScanState AvState { get; set; } = AvScanState.NotScanned;
+    public string? AvDetail { get; set; }
+
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? CompletedAt { get; set; }
+    public DateTimeOffset? ExpiresAt { get; set; }
+    public DateTimeOffset? DeletedAt { get; set; }
+
+    public ICollection<FileChunk> Chunks { get; set; } = [];
+}
+
+public class FileChunk
+{
+    public Guid FileId { get; set; }
+    public StoredFile File { get; set; } = null!;
+    public long ChunkIndex { get; set; }
+    public int ByteLength { get; set; }
+    public byte[] AuthTag { get; set; } = null!;
+    public DateTimeOffset ReceivedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
 public class Session
 {
     public Guid Id { get; set; } = Guid.NewGuid();

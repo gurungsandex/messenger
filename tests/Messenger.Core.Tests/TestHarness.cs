@@ -27,10 +27,12 @@ public sealed class TestHarness : IDisposable
     public AuditService Audit { get; }
     public PresenceService Presence { get; }
     public GroupService Groups { get; }
+    public FileTransferService Files { get; }
+    public InMemoryFileStore Store { get; }
     public PasswordHasher Hasher { get; }
     public InMemoryAuditSigningKeyProvider SigningKeys { get; }
 
-    public TestHarness()
+    public TestHarness(IMalwareScanner? scanner = null)
     {
         _connection = new SqliteConnection("DataSource=:memory:");
         _connection.Open();
@@ -55,6 +57,8 @@ public sealed class TestHarness : IDisposable
         Messages = new MessageService(Db, KeyStore, new MessageCipher(), Time);
         Presence = new PresenceService(Db, Time);
         Groups = new GroupService(Db, Audit, Time);
+        Store = new InMemoryFileStore();
+        Files = new FileTransferService(Db, Store, KeyStore, new FileCipher(), Audit, scanner, Time);
     }
 
     public User AddUser(string username, string? password = null, UserStatus status = UserStatus.Active)
