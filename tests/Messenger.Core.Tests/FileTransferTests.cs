@@ -356,6 +356,57 @@ public class FileIntegrityTests : FileTestBase
         Assert.Equal(ErrorCode.ChunkManifestMismatch, ex.Code);
     }
 
+    /// <summary>
+    /// The streaming download decrypts a chunk at a time instead of assembling the file in
+    /// memory. It has to produce byte-identical output to the buffered path, and go through
+    /// the same authorization and integrity checks — the two sharing one gate is what keeps
+    /// them from drifting apart.
+    /// </summary>
+    [Fact]
+    public async Task Streaming_a_download_yields_the_same_bytes()
+    {
+        var content = RandomContent(ChunkSize * 3 + 17);
+        var fileId = await UploadAsync(content);
+
+        using var destination = new MemoryStream();
+        await H.Files.DownloadToAsync(Bob.Id, fileId, destination);
+
+        Assert.Equal(content, destination.ToArray());
+        Assert.Equal(content, await H.Files.DownloadAsync(Bob.Id, fileId));
+    }
+
+    [Fact]
+    public async Task Streaming_a_download_enforces_access()
+    {
+        var carol = H.AddUser("carol");
+        var fileId = await UploadAsync(RandomContent(500));
+
+        using var destination = new MemoryStream();
+        var ex = await Assert.ThrowsAsync<MessengerException>(
+            () => H.Files.DownloadToAsync(carol.Id, fileId, destination));
+
+        Assert.Equal(ErrorCode.FileAccessDenied, ex.Code);
+        Assert.Equal(0, destination.Length);
+    }
+
+    /// <summary>
+    /// The buffered path sizes its output from the chunk rows. If those disagree with the
+    /// recorded file size the mismatch has to be an error, not a buffer sized from one
+    /// number and filled from another.
+    /// </summary>
+    [Fact]
+    public async Task Detects_chunk_lengths_that_disagree_with_the_recorded_size()
+    {
+        var fileId = await UploadAsync(RandomContent(ChunkSize * 2));
+
+        var file = await H.Db.StoredFiles.SingleAsync(f => f.Id == fileId);
+        file.SizeBytes -= 1;
+        await H.Db.SaveChangesAsync();
+
+        var ex = await Assert.ThrowsAsync<MessengerException>(() => H.Files.DownloadAsync(Bob.Id, fileId));
+        Assert.Equal(ErrorCode.ChunkManifestMismatch, ex.Code);
+    }
+
     [Fact]
     public void Manifest_changes_when_a_tag_changes()
     {
@@ -521,6 +572,54 @@ public class FileDeletionTests : FileTestBase
 
         var entry = await H.Db.AuditLog.SingleAsync(e => e.Action == "file.delete");
         Assert.Contains("crypto_shredded", entry.DetailJson!);
+    }
+
+    /// <summary>
+    /// Deletion is irreversible — the key is destroyed, so no backup brings the content
+    /// back. Every other entry point checks the caller against the file; this one taking a
+    /// file id and destroying whatever it named let any conversation peer shred another
+    /// user's upload.
+    /// </summary>
+    [Fact]
+    public async Task A_peer_cannot_delete_someone_elses_upload()
+    {
+        var fileId = await UploadAsync(RandomContent(500));
+
+        var ex = await Assert.ThrowsAsync<MessengerException>(() => H.Files.DeleteAsync(Bob.Id, fileId));
+        Assert.Equal(ErrorCode.FileAccessDenied, ex.Code);
+
+        var file = await H.Db.StoredFiles.SingleAsync(f => f.Id == fileId);
+        Assert.Null(file.DeletedAt);
+        Assert.NotEmpty(file.WrappedDek);
+
+        // Still readable: the refusal has to leave the file intact, not half-shredded.
+        Assert.Equal(500, (await H.Files.DownloadAsync(Bob.Id, fileId)).Length);
+    }
+
+    [Fact]
+    public async Task A_refused_deletion_is_audited()
+    {
+        var fileId = await UploadAsync(RandomContent(500));
+        await Assert.ThrowsAsync<MessengerException>(() => H.Files.DeleteAsync(Bob.Id, fileId));
+
+        var entry = await H.Db.AuditLog.SingleAsync(e => e.Action == "file.delete");
+        Assert.Equal("denied", entry.Outcome);
+    }
+
+    /// <summary>
+    /// The escape hatch a retention or moderation route would use, after making its own
+    /// authorization decision. It has to be opted into explicitly.
+    /// </summary>
+    [Fact]
+    public async Task An_administrative_caller_may_delete_another_users_upload()
+    {
+        var fileId = await UploadAsync(RandomContent(500));
+
+        await H.Files.DeleteAsync(Bob.Id, fileId, asAdministrator: true);
+
+        var file = await H.Db.StoredFiles.SingleAsync(f => f.Id == fileId);
+        Assert.NotNull(file.DeletedAt);
+        Assert.Empty(file.WrappedDek);
     }
 }
 

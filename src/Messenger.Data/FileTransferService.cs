@@ -92,8 +92,14 @@ public sealed class FileTransferService(
         if (used + sizeBytes > policy.PerUserQuotaBytes)
             throw new MessengerException(ErrorCode.QuotaExceeded, "Your storage quota is full.");
 
-        if (await store.GetUsedBytesAsync(ct) + sizeBytes > policy.StorageCapacityBytes)
+        // Only measured when a capacity is actually configured. The local store measures by
+        // walking every file it holds, so an unbounded capacity — the default — was paying
+        // for a full directory enumeration on every single upload and discarding the answer.
+        if (policy.StorageCapacityBytes != long.MaxValue
+            && await store.GetUsedBytesAsync(ct) + sizeBytes > policy.StorageCapacityBytes)
+        {
             throw new MessengerException(ErrorCode.StorageFull, "The server file store has insufficient space.");
+        }
 
         var now = _time.GetUtcNow();
         var dek = RandomNumberGenerator.GetBytes(32);
@@ -218,13 +224,18 @@ public sealed class FileTransferService(
                 throw new MessengerException(ErrorCode.ChunkSequenceError, $"Chunk {i} is missing.");
         }
 
-        // Reassemble and verify against the digest the client declared up front. This is
-        // what catches corruption in transit and a client that lied about its content.
-        var plaintext = await ReadPlaintextAsync(file, chunks, ct);
-        try
+        // Verify against the digest the client declared up front. This is what catches
+        // corruption in transit and a client that lied about its content.
+        //
+        // Hashed a chunk at a time rather than over a reassembled copy: the whole point of
+        // chunking is that a 100 MB transfer never needs 100 MB of server memory, and
+        // reassembling to hash gave that back — with the growth churn of a MemoryStream on
+        // top. Only a configured scanner needs the file whole.
+        using (var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
         {
-            var actual = SHA256.HashData(plaintext);
-            if (!CryptographicOperations.FixedTimeEquals(actual, file.Sha256Plaintext))
+            await WritePlaintextAsync(file, chunks, new IncrementalHashStream(digest), ct);
+
+            if (!CryptographicOperations.FixedTimeEquals(digest.GetCurrentHash(), file.Sha256Plaintext))
             {
                 file.UploadState = Core.UploadState.Failed;
                 await db.SaveChangesAsync(ct);
@@ -233,17 +244,13 @@ public sealed class FileTransferService(
                 throw new MessengerException(ErrorCode.FileIntegrityCheckFailed,
                     "The uploaded content does not match the declared SHA-256.");
             }
-
-            file.ChunkManifest = FileCipher.BuildManifest(chunks.Select(c => c.AuthTag).ToList());
-            file.UploadState = Core.UploadState.Complete;
-            file.CompletedAt = _time.GetUtcNow();
-
-            await RunScanAsync(file, plaintext, ct);
         }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(plaintext);
-        }
+
+        file.ChunkManifest = FileCipher.BuildManifest(chunks.Select(c => c.AuthTag).ToList());
+        file.UploadState = Core.UploadState.Complete;
+        file.CompletedAt = _time.GetUtcNow();
+
+        await RunScanAsync(file, chunks, ct);
 
         await db.SaveChangesAsync(ct);
         await audit.AppendAsync("file.upload_complete", "success", uploaderId, "client", null,
@@ -255,6 +262,42 @@ public sealed class FileTransferService(
     /// no authority, and the uploader's permission is not the downloader's.
     /// </summary>
     public async Task<byte[]> DownloadAsync(Guid userId, Guid fileId, CancellationToken ct = default)
+    {
+        var (file, chunks) = await AuthoriseDownloadAsync(userId, fileId, ct);
+
+        // One exactly-sized allocation. Assembling into a growable MemoryStream and then
+        // calling ToArray held two copies of the file at once and, because the stream
+        // doubles as it grows, reserved up to twice the file size for the first of them —
+        // roughly 3x the file in flight, per concurrent download.
+        var plaintext = new byte[TotalBytes(file, chunks)];
+        await WritePlaintextAsync(file, chunks, new MemoryStream(plaintext, writable: true), ct);
+
+        await audit.AppendAsync("file.download", "success", userId, "client", null, "file", fileId, null, ct);
+        return plaintext;
+    }
+
+    /// <summary>
+    /// Streams a completed file to <paramref name="destination"/>, decrypting a chunk at a
+    /// time. Preferred over <see cref="DownloadAsync"/> wherever the caller has somewhere to
+    /// write to — an HTTP response body, a pipe — because peak memory stays at one chunk
+    /// however large the file is.
+    /// </summary>
+    public async Task DownloadToAsync(Guid userId, Guid fileId, Stream destination, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+
+        var (file, chunks) = await AuthoriseDownloadAsync(userId, fileId, ct);
+        await WritePlaintextAsync(file, chunks, destination, ct);
+
+        await audit.AppendAsync("file.download", "success", userId, "client", null, "file", fileId, null, ct);
+    }
+
+    /// <summary>
+    /// Every check a download must pass, in order, returning the chunk set to read. Shared
+    /// so the buffered and streaming paths cannot drift apart on what they enforce.
+    /// </summary>
+    private async Task<(StoredFile File, List<FileChunk> Chunks)> AuthoriseDownloadAsync(
+        Guid userId, Guid fileId, CancellationToken ct)
     {
         var file = await db.StoredFiles.FirstOrDefaultAsync(f => f.Id == fileId && f.DeletedAt == null, ct)
                    ?? throw new MessengerException(ErrorCode.FileNotFound, "File not found.");
@@ -293,10 +336,7 @@ public sealed class FileTransferService(
             throw new MessengerException(ErrorCode.ChunkManifestMismatch,
                 "The stored chunk set does not match this file's manifest; it will not be served.");
 
-        var plaintext = await ReadPlaintextAsync(file, chunks, ct);
-
-        await audit.AppendAsync("file.download", "success", userId, "client", null, "file", fileId, null, ct);
-        return plaintext;
+        return (file, chunks);
     }
 
     /// <summary>
@@ -305,10 +345,27 @@ public sealed class FileTransferService(
     /// This is why files hold a per-file DEK: without it, a restored backup of the file
     /// store would resurrect content that was deliberately deleted.
     /// </summary>
-    public async Task DeleteAsync(Guid actorId, Guid fileId, CancellationToken ct = default)
+    /// <param name="asAdministrator">
+    /// Set only by a caller that has already made its own authorization decision — a future
+    /// retention or moderation route, which would check a permission first. Deletion here
+    /// is irreversible — the key is destroyed, so no backup restores the content — and every
+    /// other entry point in this service checks the caller against the file. Defaulting this
+    /// to false means a new call site has to opt into skipping the ownership check rather
+    /// than silently inheriting no check at all.
+    /// </param>
+    public async Task DeleteAsync(
+        Guid actorId, Guid fileId, bool asAdministrator = false, CancellationToken ct = default)
     {
         var file = await db.StoredFiles.FirstOrDefaultAsync(f => f.Id == fileId && f.DeletedAt == null, ct)
                    ?? throw new MessengerException(ErrorCode.FileNotFound, "File not found.");
+
+        if (!asAdministrator && file.UploaderId != actorId)
+        {
+            await audit.AppendAsync("file.delete", "denied", actorId, "client", null,
+                "file", fileId, "{\"reason\":\"not_uploader\"}", ct);
+            throw new MessengerException(ErrorCode.FileAccessDenied,
+                "Only the uploader can delete this file.");
+        }
 
         await store.DeleteAsync(file.StorageKey, ct);
 
@@ -319,10 +376,18 @@ public sealed class FileTransferService(
         await db.SaveChangesAsync(ct);
 
         await audit.AppendAsync("file.delete", "success", actorId, "client", null,
-            "file", fileId, "{\"crypto_shredded\":true}", ct);
+            "file", fileId,
+            $"{{\"crypto_shredded\":true,\"as_administrator\":{(asAdministrator ? "true" : "false")}}}", ct);
     }
 
-    private async Task RunScanAsync(StoredFile file, byte[] plaintext, CancellationToken ct)
+    /// <summary>
+    /// Runs the configured scanner over a completed upload.
+    ///
+    /// The file is reassembled only when a scanner is actually configured — the shipped
+    /// default is the no-op, and materialising the whole payload to hand to something that
+    /// ignores it was the single largest allocation in the upload path.
+    /// </summary>
+    private async Task RunScanAsync(StoredFile file, List<FileChunk> chunks, CancellationToken ct)
     {
         if (_scanner is NoOpMalwareScanner)
         {
@@ -330,8 +395,12 @@ public sealed class FileTransferService(
             return;
         }
 
+        byte[]? plaintext = null;
         try
         {
+            plaintext = new byte[TotalBytes(file, chunks)];
+            await WritePlaintextAsync(file, chunks, new MemoryStream(plaintext, writable: true), ct);
+
             using var stream = new MemoryStream(plaintext, writable: false);
             var (isClean, detail) = await _scanner.ScanAsync(stream, file.FileName, ct);
             file.AvState = isClean ? AvScanState.Clean : AvScanState.Infected;
@@ -344,14 +413,22 @@ public sealed class FileTransferService(
             file.AvState = AvScanState.Error;
             file.AvDetail = ex.Message;
         }
+        finally
+        {
+            if (plaintext is not null) CryptographicOperations.ZeroMemory(plaintext);
+        }
     }
 
-    private async Task<byte[]> ReadPlaintextAsync(StoredFile file, List<FileChunk> chunks, CancellationToken ct)
+    /// <summary>
+    /// Decrypts every chunk in order and writes the plaintext straight to
+    /// <paramref name="destination"/>, holding one chunk in memory at a time.
+    /// </summary>
+    private async Task WritePlaintextAsync(
+        StoredFile file, List<FileChunk> chunks, Stream destination, CancellationToken ct)
     {
         var dek = keyStore.Unwrap(file.WrappedDek, file.KekId);
         try
         {
-            using var assembled = new MemoryStream();
             foreach (var chunk in chunks)
             {
                 var ciphertext = await store.ReadChunkAsync(file.StorageKey, chunk.ChunkIndex, ct)
@@ -362,15 +439,41 @@ public sealed class FileTransferService(
                     dek, ciphertext, chunk.AuthTag, file.Id, file.NoncePrefix,
                     chunk.ChunkIndex, file.ChunkCount, file.KeyVersion);
 
-                assembled.Write(plain, 0, plain.Length);
-                CryptographicOperations.ZeroMemory(plain);
+                try
+                {
+                    await destination.WriteAsync(plain, ct);
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(plain);
+                }
             }
-            return assembled.ToArray();
         }
         finally
         {
             CryptographicOperations.ZeroMemory(dek);
         }
+    }
+
+    /// <summary>
+    /// Size of the reassembled plaintext, taken from the chunk rows rather than the size the
+    /// uploader declared. The two agree — every chunk's length is checked on arrival — but a
+    /// fixed-size buffer must be sized by what will actually be written into it, so that a
+    /// disagreement is a caught error here rather than an overflow later.
+    /// </summary>
+    private static int TotalBytes(StoredFile file, List<FileChunk> chunks)
+    {
+        var total = chunks.Sum(c => (long)c.ByteLength);
+
+        if (total != file.SizeBytes)
+            throw new MessengerException(ErrorCode.ChunkManifestMismatch,
+                $"The stored chunks total {total} bytes; this file is recorded as {file.SizeBytes}.");
+
+        if (total > Array.MaxLength)
+            throw new MessengerException(ErrorCode.FileTooLarge,
+                "This file is too large to be served as a single buffer; stream it instead.");
+
+        return (int)total;
     }
 
     private async Task<StoredFile> RequireUploadableAsync(Guid uploaderId, Guid fileId, CancellationToken ct)
@@ -446,5 +549,52 @@ public sealed class FileTransferService(
         if (!await IsParticipantAsync(userId, conversationId, ct))
             throw new MessengerException(ErrorCode.NotAConversationParticipant,
                 "You are not a participant in this conversation.");
+    }
+
+    /// <summary>
+    /// A write-only sink that feeds everything written to it into a running hash. Lets the
+    /// completion digest reuse the same chunk-at-a-time decryption path as a download,
+    /// without either of them needing the file whole.
+    /// </summary>
+    private sealed class IncrementalHashStream(IncrementalHash hash) : Stream
+    {
+        private long _length;
+
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => _length;
+
+        public override long Position
+        {
+            get => _length;
+            set => throw new NotSupportedException();
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+            => Write(new ReadOnlySpan<byte>(buffer, offset, count));
+
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            hash.AppendData(buffer);
+            _length += buffer.Length;
+        }
+
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct = default)
+        {
+            Write(buffer.Span);
+            return ValueTask.CompletedTask;
+        }
+
+        public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken ct)
+        {
+            Write(new ReadOnlySpan<byte>(buffer, offset, count));
+            return Task.CompletedTask;
+        }
+
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
     }
 }

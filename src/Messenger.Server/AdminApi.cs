@@ -50,6 +50,19 @@ public static class AdminApi
         {
             var actorId = http.ActorId();
 
+            // Every rejectable condition is checked before the first write. Creating the row
+            // first and validating afterwards left a failed request behind as a real account:
+            // no password, no role, and a consumed licence seat, invisible until an
+            // administrator wondered why the seat count was wrong.
+            if (Invalid(request.Username, 256, out var usernameError))
+                return Problem(ErrorCode.MalformedRequest, $"Username {usernameError}");
+            if (Invalid(request.DisplayName, 256, out var displayNameError))
+                return Problem(ErrorCode.MalformedRequest, $"Display name {displayNameError}");
+            if (request.Email is { Length: > 320 })
+                return Problem(ErrorCode.MalformedRequest, "Email address is too long.");
+
+            AuthService.ValidatePasswordPolicy(request.InitialPassword);
+
             // Seat enforcement happens at provisioning, not at login: an administrator must
             // learn they are out of seats when creating the account, not when the user is
             // turned away days later.
@@ -96,10 +109,17 @@ public static class AdminApi
                 return Problem(ErrorCode.SelfModificationRefused,
                     "Have another administrator change your own account status.");
 
+            // Parsed before the lookup so an unrecognised status is a 400 naming the valid
+            // values, not an unhandled ArgumentException surfacing as an opaque 500.
+            if (!Enum.TryParse<UserStatus>(request.Status, ignoreCase: true, out var target)
+                || !Enum.IsDefined(target))
+            {
+                return Problem(ErrorCode.MalformedRequest,
+                    $"Status must be one of: {string.Join(", ", Enum.GetNames<UserStatus>())}.");
+            }
+
             var user = await db.Users.FirstOrDefaultAsync(u => u.Id == id && u.DeletedAt == null, ct);
             if (user is null) return Problem(ErrorCode.AccountNotFound, "User not found.");
-
-            var target = Enum.Parse<UserStatus>(request.Status, ignoreCase: true);
             if (target == UserStatus.Active && user.Status != UserStatus.Active)
                 await license.EnsureSeatAvailableAsync(user.Id, ct);
 
@@ -284,6 +304,29 @@ public static class AdminApi
 
     private static IResult Problem(string code, string message)
         => Results.Json(new ErrorDto(code, message, null), statusCode: StatusCodes.Status400BadRequest);
+
+    /// <summary>
+    /// Rejects a required string that is missing, blank, or longer than the column that has
+    /// to hold it. Length is checked here rather than left to the database, where an
+    /// over-long value becomes a DbUpdateException and reaches the caller as a 500.
+    /// </summary>
+    private static bool Invalid(string? value, int maxLength, out string reason)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            reason = "is required.";
+            return true;
+        }
+
+        if (value.Length > maxLength)
+        {
+            reason = $"must be {maxLength} characters or fewer.";
+            return true;
+        }
+
+        reason = string.Empty;
+        return false;
+    }
 }
 
 public sealed record UserSummary(Guid Id, string Username, string DisplayName, string? Email,

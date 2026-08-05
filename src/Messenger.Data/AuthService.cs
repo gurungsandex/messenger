@@ -45,7 +45,8 @@ public sealed class AuthService(
             // Without this, timing alone enumerates valid usernames.
             _ = hasher.Verify(password, DummyHash);
             await audit.AppendAsync("auth.login", "denied", null, "client", ip,
-                "user", null, $"{{\"username\":\"{Sanitize(username)}\",\"reason\":\"not_found\"}}", ct);
+                "user", null,
+                $"{{\"username\":{JsonString(username)},\"reason\":\"not_found\"}}", ct);
             return new AuthResult(false, null, ErrorCode.AccountNotFound);
         }
 
@@ -104,7 +105,7 @@ public sealed class AuthService(
     public async Task SetPasswordAsync(
         User user, string newPassword, SessionService sessions, CancellationToken ct = default)
     {
-        ValidatePolicy(newPassword);
+        ValidatePasswordPolicy(newPassword);
 
         user.PasswordHash = hasher.Hash(newPassword);
         user.PasswordUpdatedAt = _time.GetUtcNow();
@@ -121,7 +122,13 @@ public sealed class AuthService(
             "user", user.Id, $"{{\"sessions_revoked\":{revoked}}}", ct);
     }
 
-    private static void ValidatePolicy(string password)
+    /// <summary>
+    /// The password policy, exposed so a caller can check it *before* committing side
+    /// effects. Account creation provisions a row, a role, and a licence seat; discovering
+    /// the password is too short only once <see cref="SetPasswordAsync"/> throws would
+    /// leave all three behind with no password ever set.
+    /// </summary>
+    public static void ValidatePasswordPolicy(string password)
     {
         if (string.IsNullOrEmpty(password) || password.Length < 12)
             throw new MessengerException(ErrorCode.PasswordPolicyRejected,
@@ -134,8 +141,17 @@ public sealed class AuthService(
         return BackoffSchedule[index];
     }
 
-    private static string Sanitize(string value)
-        => value.Replace("\\", "\\\\").Replace("\"", "\\\"");
+    /// <summary>
+    /// Encodes a value as a JSON string literal, quotes included.
+    ///
+    /// Hand-rolled escaping of quote and backslash is not enough: JSON forbids raw control
+    /// characters, so a username containing a newline or a NUL would produce a detail field
+    /// that no parser accepts — and that field is hashed into the audit chain, so the
+    /// malformed entry is permanent. The serialiser handles the whole escape set, and is
+    /// what every other audit call site in this codebase already uses.
+    /// </summary>
+    private static string JsonString(string value)
+        => System.Text.Json.JsonSerializer.Serialize(value);
 
     /// <summary>A real Argon2id hash of a random value, used only to equalise timing.</summary>
     private static readonly string DummyHash =

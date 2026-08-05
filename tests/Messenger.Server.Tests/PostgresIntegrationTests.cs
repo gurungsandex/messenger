@@ -229,6 +229,69 @@ public sealed class PostgresIntegrationTests : IAsyncLifetime
         Assert.Equal(entry.Id, result.FirstInvalidEntryId);
     }
 
+    /// <summary>
+    /// Concurrent senders in one conversation contend for the next sequence number: each
+    /// reads it from the conversation row, and the unique index on (conversation_id, seq)
+    /// lets exactly one of them insert it. The loser has to be retried onto the next free
+    /// number — otherwise an ordinary message on a busy conversation fails with a 500.
+    ///
+    /// This needs the real database. SQLite runs the unit suite over one shared connection,
+    /// which serialises writers and so cannot produce the race at all.
+    /// </summary>
+    [SkippableFact]
+    public async Task Concurrent_senders_each_get_a_distinct_sequence_number()
+    {
+        Skip.If(ConnectionString is null, "MESSENGER_TEST_CONNECTION is not set.");
+
+        var alice = AddUser("alice_" + Guid.NewGuid().ToString("N")[..8]);
+        var bob = AddUser("bob_" + Guid.NewGuid().ToString("N")[..8]);
+        var conversation = await _messages.GetOrCreateDirectConversationAsync(alice.Id, bob.Id);
+
+        const int senders = 8;
+        var scoped = new NpgsqlConnectionStringBuilder(ConnectionString!) { Database = _schema }.ConnectionString;
+
+        // A context per sender, as the server has: DbContext is scoped per request, so two
+        // simultaneous sends never share one. A single shared context would serialise them
+        // and prove nothing.
+        var contexts = Enumerable.Range(0, senders)
+            .Select(_ => new MessengerDbContext(
+                new DbContextOptionsBuilder<MessengerDbContext>().UseNpgsql(scoped).Options))
+            .ToList();
+
+        try
+        {
+            var barrier = new TaskCompletionSource();
+            var sends = contexts.Select((context, i) => Task.Run(async () =>
+            {
+                var service = new MessageService(context, _keyStore, new MessageCipher());
+                await barrier.Task;
+                return await service.SendAsync(i % 2 == 0 ? alice.Id : bob.Id,
+                    new SendMessageRequest(conversation.Id, Guid.NewGuid(), $"racing {i}", DateTimeOffset.UtcNow));
+            })).ToList();
+
+            barrier.SetResult();
+            var acks = await Task.WhenAll(sends);
+
+            // Every send succeeded, and the sequence numbers form a gapless run.
+            Assert.Equal(senders, acks.Select(a => a.Seq).Distinct().Count());
+            Assert.Equal(Enumerable.Range(1, senders).Select(i => (long)i), acks.Select(a => a.Seq).Order());
+        }
+        finally
+        {
+            foreach (var context in contexts) await context.DisposeAsync();
+        }
+
+        _db.ChangeTracker.Clear();
+        Assert.Equal(senders + 1, (await _db.Conversations.SingleAsync(c => c.Id == conversation.Id)).NextSeq);
+
+        // All eight bodies survive: a retried attempt must re-seal and land, not vanish.
+        var history = await _messages.GetHistoryAsync(alice.Id, conversation.Id);
+        Assert.Equal(senders, history.Count);
+        Assert.Equal(
+            Enumerable.Range(0, senders).Select(i => $"racing {i}").Order(),
+            history.Select(m => m.Body).Order());
+    }
+
     /// <summary>Confirms the SQLite tick-converter is genuinely not applied on Npgsql.</summary>
     [SkippableFact]
     public async Task Timestamps_are_stored_as_timestamptz_not_ticks()
