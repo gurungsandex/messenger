@@ -34,6 +34,7 @@ public sealed class TestHarness : IDisposable
     public DirectorySyncService DirectorySync { get; }
     public LicenseEnforcementService License { get; }
     public byte[] VendorPrivateKey { get; }
+    public AuthorizationService Authorization { get; }
     public PasswordHasher Hasher { get; }
     public InMemoryAuditSigningKeyProvider SigningKeys { get; }
 
@@ -70,6 +71,16 @@ public sealed class TestHarness : IDisposable
         var (vendorPrivate, vendorPublic) = LicenseDocument.GenerateVendorKeyPair();
         VendorPrivateKey = vendorPrivate;
         License = new LicenseEnforcementService(Db, new LicenseValidator(vendorPublic, Time), Audit, Time);
+
+        Authorization = new AuthorizationService(Db, Audit);
+        Authorization.SeedBuiltInRolesAsync().GetAwaiter().GetResult();
+    }
+
+    /// <summary>Grants a built-in role by name.</summary>
+    public void GrantRole(Guid userId, string roleName)
+    {
+        var role = Db.Roles.Single(r => r.Name == roleName);
+        Authorization.AssignRoleAsync(userId, role.Id, Guid.Empty).GetAwaiter().GetResult();
     }
 
     public User AddUser(string username, string? password = null, UserStatus status = UserStatus.Active)
@@ -84,6 +95,7 @@ public sealed class TestHarness : IDisposable
         };
         Db.Users.Add(user);
         Db.SaveChanges();
+        Authorization?.EnsureDefaultRoleAsync(user.Id).GetAwaiter().GetResult();
         return user;
     }
 

@@ -6,6 +6,12 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Messenger.Data;
 
+/// <summary>Whether the licence currently permits new messages, and why not if it does not.</summary>
+public sealed record SendGateState(bool AllowsSending, string ErrorCode, string Detail)
+{
+    public static readonly SendGateState Allowed = new(true, string.Empty, string.Empty);
+}
+
 /// <summary>
 /// Message send, retrieval, receipts, and store-and-forward backlog.
 ///
@@ -25,6 +31,15 @@ public sealed class MessageService(
     public const int MaxMessageBytes = 64 * 1024;
 
     private readonly TimeProvider _time = timeProvider ?? TimeProvider.System;
+
+    /// <summary>
+    /// Optional licence gate consulted on every send.
+    ///
+    /// Injected as a delegate rather than a service reference to keep `Messenger.Data` free
+    /// of a dependency on licensing internals, and so the messaging tests do not need a
+    /// licence installed to send a message.
+    /// </summary>
+    public Func<CancellationToken, Task<SendGateState>>? LicenseGate { get; set; }
 
     /// <summary>Finds or creates the 1:1 conversation between two users.</summary>
     public async Task<Conversation> GetOrCreateDirectConversationAsync(
@@ -87,6 +102,17 @@ public sealed class MessageService(
         if (participants.All(p => p.UserId != senderId))
             throw new MessengerException(ErrorCode.NotAConversationParticipant,
                 "You are not a participant in this conversation.");
+
+        // Licence state is re-checked on send, not only at login. Grace mode is defined as
+        // "history readable, no new sessions and no new messages" — enforcing it only at
+        // login would leave every already-connected client sending indefinitely, so a
+        // deployment could run for weeks past expiry without noticing.
+        if (LicenseGate is not null)
+        {
+            var state = await LicenseGate(ct);
+            if (!state.AllowsSending)
+                throw new MessengerException(state.ErrorCode, state.Detail);
+        }
 
         // A deactivated group stops accepting messages, but its history stays readable and
         // its membership intact, so reactivation loses nothing.

@@ -15,6 +15,9 @@ public sealed class AuditService(MessengerDbContext db, IAuditSigningKeyProvider
 {
     public const int CheckpointInterval = 1000;
 
+    /// <summary>Serialises chain appends within the process. See AppendAsync.</summary>
+    private static readonly SemaphoreSlim AppendLock = new(1, 1);
+
     /// <summary>
     /// Appends an entry. The caller is responsible for the surrounding transaction; the
     /// chain is only consistent if appends within a transaction are serialised, which is
@@ -31,6 +34,15 @@ public sealed class AuditService(MessengerDbContext db, IAuditSigningKeyProvider
         string? detailJson = null,
         CancellationToken ct = default)
     {
+        // Appends are serialised across all server threads. The chain is a linked list: two
+        // concurrent appends would read the same head, compute the same predecessor hash and
+        // the same id, and one would lose — turning an ordinary concurrent request into a
+        // refused operation, because audit writes are fail-closed.
+        //
+        // A process-wide lock is correct for the single-server topology (ADR-0003). Adding a
+        // second server requires a database-level advisory lock here; that is called out in
+        // the HA seams rather than left to be discovered.
+        await AppendLock.WaitAsync(ct);
         try
         {
             var head = await db.AuditLog
@@ -78,6 +90,10 @@ public sealed class AuditService(MessengerDbContext db, IAuditSigningKeyProvider
         {
             throw new MessengerException(ErrorCode.AuditWriteFailed,
                 "The action was refused because it could not be audited.", ex.Message);
+        }
+        finally
+        {
+            AppendLock.Release();
         }
     }
 

@@ -35,6 +35,47 @@ public class User
     public ICollection<ConversationParticipant> Participations { get; set; } = [];
 }
 
+/// <summary>
+/// The tier a role belongs to. Enforced at assignment so a customer-side role can never
+/// carry vendor-tier capability, regardless of how its permissions were seeded.
+/// </summary>
+public enum RoleScope { Owner = 0, Server = 1, Client = 2 }
+
+public class Role
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Name { get; set; } = null!;
+    public string? Description { get; set; }
+    public RoleScope Scope { get; set; } = RoleScope.Client;
+
+    /// <summary>Seeded roles cannot be edited or deleted (AUTH-304).</summary>
+    public bool IsBuiltIn { get; set; }
+
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public ICollection<RolePermission> Permissions { get; set; } = [];
+    public ICollection<UserRole> Users { get; set; } = [];
+}
+
+public class RolePermission
+{
+    public Guid RoleId { get; set; }
+    public Role Role { get; set; } = null!;
+
+    /// <summary>Stable permission key, e.g. <c>users.create</c>. See <c>Permissions</c>.</summary>
+    public string PermissionKey { get; set; } = null!;
+}
+
+public class UserRole
+{
+    public Guid UserId { get; set; }
+    public User User { get; set; } = null!;
+    public Guid RoleId { get; set; }
+    public Role Role { get; set; } = null!;
+    public DateTimeOffset AssignedAt { get; set; } = DateTimeOffset.UtcNow;
+    public Guid? AssignedBy { get; set; }
+}
+
 public enum GroupType { Chat = 0, Security = 1, Distribution = 2 }
 
 public enum GroupStatus { Active = 0, Disabled = 1 }

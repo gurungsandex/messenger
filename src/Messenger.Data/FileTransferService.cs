@@ -259,7 +259,12 @@ public sealed class FileTransferService(
         var file = await db.StoredFiles.FirstOrDefaultAsync(f => f.Id == fileId && f.DeletedAt == null, ct)
                    ?? throw new MessengerException(ErrorCode.FileNotFound, "File not found.");
 
-        if (!await IsParticipantAsync(userId, file.ConversationId, ct))
+        // Membership alone is not sufficient. Group history visibility windows apply to
+        // files exactly as they do to messages: a member added today must not be able to
+        // download files shared before they joined, and a removed member must not reach
+        // files shared after they left. Checking only membership would leave the
+        // confidentiality boundary enforced for messages and open for their attachments.
+        if (!await CanAccessFileAsync(userId, file, ct))
             throw new MessengerException(ErrorCode.FileAccessDenied, "You do not have access to this file.");
 
         if (file.UploadState != Core.UploadState.Complete)
@@ -396,6 +401,45 @@ public sealed class FileTransferService(
     private async Task<bool> IsParticipantAsync(Guid userId, Guid conversationId, CancellationToken ct)
         => await db.ConversationParticipants
             .AnyAsync(p => p.ConversationId == conversationId && p.UserId == userId && p.LeftAt == null, ct);
+
+    /// <summary>
+    /// Whether a user may read a stored file, honouring the same visibility window that
+    /// governs messages.
+    ///
+    /// A file is anchored to the message that carried it. Where a file has no message —
+    /// an upload completed but never sent — only a current participant may reach it, and
+    /// only if they were present when it was created.
+    /// </summary>
+    private async Task<bool> CanAccessFileAsync(Guid userId, StoredFile file, CancellationToken ct)
+    {
+        var window = await db.ConversationParticipants
+            .Where(p => p.ConversationId == file.ConversationId && p.UserId == userId)
+            .Select(p => new { p.VisibleFromSeq, p.VisibleToSeq, p.LeftAt })
+            .FirstOrDefaultAsync(ct);
+
+        if (window is null) return false;
+
+        // The uploader always retains access to their own upload.
+        if (file.UploaderId == userId) return true;
+
+        var messageSeq = file.MessageId is null
+            ? (long?)null
+            : await db.Messages.Where(m => m.Id == file.MessageId)
+                .Select(m => (long?)m.Seq).FirstOrDefaultAsync(ct);
+
+        if (messageSeq is { } seq)
+            return seq >= window.VisibleFromSeq && (window.VisibleToSeq is null || seq <= window.VisibleToSeq);
+
+        // Unattached upload: require current membership, and require that the participant's
+        // window was already open when the file was created.
+        if (window.LeftAt is not null) return false;
+
+        var seqAtUpload = await db.Messages
+            .Where(m => m.ConversationId == file.ConversationId && m.ServerReceivedAt <= file.CreatedAt)
+            .CountAsync(ct);
+
+        return window.VisibleFromSeq <= seqAtUpload + 1;
+    }
 
     private async Task EnsureParticipantAsync(Guid userId, Guid conversationId, CancellationToken ct)
     {

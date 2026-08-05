@@ -4,7 +4,7 @@ A private, self-hosted corporate IM platform for LAN/WAN/enterprise networks. In
 1:1 chat, group chat, file transfer, and presence, with no cloud dependency and no
 third-party message relay. All customer data stays on customer infrastructure.
 
-> **Status: server-side complete, Windows packaging not started.** 245 tests pass,
+> **Status: server-side complete and security-reviewed; Windows packaging not started.** 284 tests pass,
 > including end-to-end HTTP tests and a PostgreSQL-backed integration suite. The
 > security-critical core is built and tested; the LDAPS binding, SSO, WPF clients, Windows
 > Service host, and installers are **not implemented**. See
@@ -33,6 +33,7 @@ compliance archiving possible. It is documented as an accepted risk in the
 | [Architecture](docs/architecture.md) | Tiers, components, protocols, trust boundaries, auth, crypto, licensing, delivery semantics. |
 | [Data model](docs/data-model.md) | PostgreSQL schema, indexes, retention, migration strategy. |
 | [Threat model](docs/threat-model.md) | Assets, attacker profiles, STRIDE per boundary, mitigations, accepted risks. |
+| [Security review](docs/security-review.md) | Findings from the pre-merge review, fixes, and what remains. |
 | [Error codes](docs/error-codes.md) | Numbered catalog — AUTH/NET/LIC/AD/FILE/SRV — with cause and remediation. |
 | [Deployment guide](docs/deployment.md) | Prerequisites, ports, AD service account, certificates, backup/restore, upgrades, and current status. |
 | [Admin quick reference](docs/quick-reference-admin.md) | One page for daily operations and incidents. |
@@ -94,6 +95,9 @@ Each phase delivers runnable code with tests. Nothing is marked complete while i
 | Directory sync engine, reconciliation rules, RFC 4515/4514 escaping | Built, tested |
 | Licensing: Ed25519 signing, offline validation, read-only grace, enforcement | Built, tested |
 | Admin REST API + SignalR hub | Built, tested |
+| RBAC: five seeded roles, per-route permissions, cross-tier escalation refused | Built, tested |
+| Durable root key store with escrow; server refuses to start without a passphrase | Built, tested |
+| TLS 1.3 enforcement, HSTS, security headers, rate limiting | Built, tested |
 | **LDAPS wire binding** | **Not built** — engine is complete behind `IDirectoryProvider`; needs a domain controller |
 | **Kerberos / NTLM SSO** | **Not built** — local Argon2id auth works |
 | **DPAPI-NG / TPM / PKCS#11 key stores** | **Not built** — abstraction and escrow complete; shipped provider is development-only |
@@ -111,11 +115,11 @@ integration and packaging, not architecture.
 ```bash
 # Requires .NET 8 SDK and PostgreSQL 16
 dotnet build
-dotnet test                        # 221 tests; database-backed tests skip without a connection
+dotnet test                        # 246 tests; database-backed tests skip without a connection
 
-# Include the PostgreSQL-backed suites (24 more: integration + end-to-end HTTP)
+# Include the PostgreSQL-backed suites (38 more: integration + end-to-end HTTP)
 export MESSENGER_TEST_CONNECTION='Host=localhost;Port=5432;Database=messenger;Username=postgres;Password=postgres'
-dotnet test                        # 245 tests
+dotnet test                        # 284 tests
 
 # Apply the schema. Migrations never run automatically at startup — an unattended
 # restart must not reshape a production database.

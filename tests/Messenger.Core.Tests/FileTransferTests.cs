@@ -402,6 +402,78 @@ public class FileAccessTests : FileTestBase
         Assert.Equal(ErrorCode.FileNotFound, ex.Code);
     }
 
+    /// <summary>
+    /// Group history visibility must apply to files exactly as it does to messages.
+    /// Checking membership alone left the confidentiality boundary enforced for messages and
+    /// wide open for their attachments — a member added today could download every file ever
+    /// shared in the group.
+    /// </summary>
+    [Fact]
+    public async Task A_member_added_later_cannot_download_files_shared_before_they_joined()
+    {
+        var admin = H.AddUser("admin");
+        var latecomer = H.AddUser("latecomer");
+        var group = await H.Groups.CreateAsync("Engineering", null, admin.Id);
+        var conversation = group.ConversationId!.Value;
+        await H.Groups.AddMemberAsync(group.Id, Alice.Id, admin.Id);
+
+        // Alice shares a file, attached to a message, before the latecomer arrives.
+        var content = RandomContent(500);
+        var slot = await H.Files.BeginUploadAsync(
+            Alice.Id, conversation, "confidential.pdf", content.Length, System.Security.Cryptography.SHA256.HashData(content));
+        await H.Files.UploadChunkAsync(Alice.Id, slot.FileId, 0, content);
+        await H.Files.CompleteUploadAsync(Alice.Id, slot.FileId);
+
+        var ack = await H.Messages.SendAsync(Alice.Id,
+            new SendMessageRequest(conversation, Guid.NewGuid(), "see attached", H.Time.GetUtcNow()));
+        var file = await H.Db.StoredFiles.SingleAsync(f => f.Id == slot.FileId);
+        file.MessageId = ack.MessageId;
+        await H.Db.SaveChangesAsync();
+
+        await H.Groups.AddMemberAsync(group.Id, latecomer.Id, admin.Id);
+
+        // They cannot read the message, and must not be able to read its attachment either.
+        Assert.Empty(await H.Messages.GetHistoryAsync(latecomer.Id, conversation));
+
+        var ex = await Assert.ThrowsAsync<MessengerException>(
+            () => H.Files.DownloadAsync(latecomer.Id, slot.FileId));
+        Assert.Equal(ErrorCode.FileAccessDenied, ex.Code);
+    }
+
+    [Fact]
+    public async Task A_member_present_at_the_time_can_still_download()
+    {
+        var admin = H.AddUser("admin");
+        var present = H.AddUser("present");
+        var group = await H.Groups.CreateAsync("Engineering", null, admin.Id);
+        var conversation = group.ConversationId!.Value;
+        await H.Groups.AddMemberAsync(group.Id, Alice.Id, admin.Id);
+        await H.Groups.AddMemberAsync(group.Id, present.Id, admin.Id);
+
+        var content = RandomContent(500);
+        var slot = await H.Files.BeginUploadAsync(
+            Alice.Id, conversation, "shared.pdf", content.Length, System.Security.Cryptography.SHA256.HashData(content));
+        await H.Files.UploadChunkAsync(Alice.Id, slot.FileId, 0, content);
+        await H.Files.CompleteUploadAsync(Alice.Id, slot.FileId);
+
+        var ack = await H.Messages.SendAsync(Alice.Id,
+            new SendMessageRequest(conversation, Guid.NewGuid(), "see attached", H.Time.GetUtcNow()));
+        var file = await H.Db.StoredFiles.SingleAsync(f => f.Id == slot.FileId);
+        file.MessageId = ack.MessageId;
+        await H.Db.SaveChangesAsync();
+
+        Assert.Equal(content, await H.Files.DownloadAsync(present.Id, slot.FileId));
+    }
+
+    [Fact]
+    public async Task The_uploader_retains_access_to_their_own_file()
+    {
+        var content = RandomContent(500);
+        var fileId = await UploadAsync(content);
+
+        Assert.Equal(content, await H.Files.DownloadAsync(Alice.Id, fileId));
+    }
+
     [Fact]
     public async Task Downloads_are_audited()
     {

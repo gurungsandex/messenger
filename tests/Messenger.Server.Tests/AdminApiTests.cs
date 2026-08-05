@@ -5,6 +5,7 @@ using Messenger.Contracts;
 using Messenger.Core;
 using Messenger.Crypto;
 using Messenger.Data;
+using Microsoft.Extensions.Configuration;
 using Messenger.Licensing;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -30,12 +31,15 @@ public sealed class AdminApiTests : IAsyncLifetime
     private HttpClient _client = null!;
     private string _database = null!;
     private byte[] _vendorPrivateKey = null!;
+    private string _keyStoreDirectory = null!;
 
     public async Task InitializeAsync()
     {
         if (BaseConnection is null) return;
 
         _database = "messenger_api_" + Guid.NewGuid().ToString("N")[..12];
+        _keyStoreDirectory = Path.Combine(Path.GetTempPath(), "messenger-test-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(_keyStoreDirectory);
 
         var admin = new NpgsqlConnectionStringBuilder(BaseConnection) { Database = "postgres" };
         await using (var setup = new NpgsqlConnection(admin.ConnectionString))
@@ -51,17 +55,21 @@ public sealed class AdminApiTests : IAsyncLifetime
         byte[] vendorPublic;
         (_vendorPrivateKey, vendorPublic) = LicenseDocument.GenerateVendorKeyPair();
 
+        // The schema must exist before the host starts: startup seeds the built-in roles,
+        // which fails against an empty database.
+        var options = new DbContextOptionsBuilder<MessengerDbContext>().UseNpgsql(scoped).Options;
+        await using (var schema = new MessengerDbContext(options))
+            await schema.Database.EnsureCreatedAsync();
+
         _factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
         {
             b.UseSetting("ConnectionStrings:Messenger", scoped);
             b.UseSetting("Licensing:VendorPublicKey", Convert.ToBase64String(vendorPublic));
+            b.UseSetting("KeyStore:Passphrase", "test-keystore-passphrase");
+            b.UseSetting("KeyStore:EscrowPath", Path.Combine(_keyStoreDirectory, "root.escrow"));
         });
 
         _client = _factory.CreateClient();
-
-        using var scope = _factory.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<MessengerDbContext>();
-        await db.Database.EnsureCreatedAsync();
     }
 
     public async Task DisposeAsync()
@@ -72,6 +80,8 @@ public sealed class AdminApiTests : IAsyncLifetime
         await _factory.DisposeAsync();
         NpgsqlConnection.ClearAllPools();
 
+        if (Directory.Exists(_keyStoreDirectory)) Directory.Delete(_keyStoreDirectory, recursive: true);
+
         var admin = new NpgsqlConnectionStringBuilder(BaseConnection) { Database = "postgres" };
         await using var cleanup = new NpgsqlConnection(admin.ConnectionString);
         await cleanup.OpenAsync();
@@ -80,7 +90,7 @@ public sealed class AdminApiTests : IAsyncLifetime
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private async Task<User> SeedUserAsync(string username, string password)
+    private async Task<User> SeedUserAsync(string username, string password, string? role = null)
     {
         using var scope = _factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MessengerDbContext>();
@@ -94,6 +104,16 @@ public sealed class AdminApiTests : IAsyncLifetime
         };
         db.Users.Add(user);
         await db.SaveChangesAsync();
+
+        var authorization = scope.ServiceProvider.GetRequiredService<AuthorizationService>();
+        await authorization.EnsureDefaultRoleAsync(user.Id);
+
+        if (role is not null)
+        {
+            var roleRow = await db.Roles.SingleAsync(r => r.Name == role);
+            await authorization.AssignRoleAsync(user.Id, roleRow.Id, Guid.Empty);
+        }
+
         return user;
     }
 
@@ -257,7 +277,7 @@ public sealed class AdminApiTests : IAsyncLifetime
     {
         Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
         await InstallLicenseAsync();
-        await SeedUserAsync("alice", "correct horse battery staple");
+        await SeedUserAsync("alice", "correct horse battery staple", BuiltInRoles.ServerAdmin);
         var token = await LoginAsync("alice", "correct horse battery staple");
 
         var response = await _client.SendAsync(
@@ -271,7 +291,7 @@ public sealed class AdminApiTests : IAsyncLifetime
     {
         Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
         await InstallLicenseAsync();
-        await SeedUserAsync("alice", "correct horse battery staple");
+        await SeedUserAsync("alice", "correct horse battery staple", BuiltInRoles.ServerAdmin);
         var token = await LoginAsync("alice", "correct horse battery staple");
 
         var response = await _client.SendAsync(Authed(HttpMethod.Get, "/api/admin/users", token));
@@ -286,7 +306,7 @@ public sealed class AdminApiTests : IAsyncLifetime
     {
         Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
         await InstallLicenseAsync();
-        await SeedUserAsync("alice", "correct horse battery staple");
+        await SeedUserAsync("alice", "correct horse battery staple", BuiltInRoles.ServerAdmin);
         var token = await LoginAsync("alice", "correct horse battery staple");
 
         var logout = await _client.SendAsync(Authed(HttpMethod.Post, "/api/auth/logout", token));
@@ -301,7 +321,7 @@ public sealed class AdminApiTests : IAsyncLifetime
     {
         Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
         await InstallLicenseAsync();
-        await SeedUserAsync("alice", "correct horse battery staple");
+        await SeedUserAsync("alice", "correct horse battery staple", BuiltInRoles.ServerAdmin);
         var token = await LoginAsync("alice", "correct horse battery staple");
 
         var response = await _client.SendAsync(Authed(HttpMethod.Get, "/api/admin/health", token));
@@ -317,7 +337,7 @@ public sealed class AdminApiTests : IAsyncLifetime
     {
         Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
         await InstallLicenseAsync(seats: 50);
-        await SeedUserAsync("alice", "correct horse battery staple");
+        await SeedUserAsync("alice", "correct horse battery staple", BuiltInRoles.ServerAdmin);
         var token = await LoginAsync("alice", "correct horse battery staple");
 
         var response = await _client.SendAsync(Authed(HttpMethod.Get, "/api/admin/license", token));
@@ -332,7 +352,7 @@ public sealed class AdminApiTests : IAsyncLifetime
     {
         Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
         await InstallLicenseAsync(seats: 1);
-        await SeedUserAsync("alice", "correct horse battery staple");
+        await SeedUserAsync("alice", "correct horse battery staple", BuiltInRoles.ServerAdmin);
         var token = await LoginAsync("alice", "correct horse battery staple");
 
         var request = Authed(HttpMethod.Post, "/api/admin/users", token);
@@ -348,7 +368,7 @@ public sealed class AdminApiTests : IAsyncLifetime
     {
         Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
         await InstallLicenseAsync();
-        var alice = await SeedUserAsync("alice", "correct horse battery staple");
+        var alice = await SeedUserAsync("alice", "correct horse battery staple", BuiltInRoles.ServerAdmin);
         var token = await LoginAsync("alice", "correct horse battery staple");
 
         var request = Authed(HttpMethod.Post, $"/api/admin/users/{alice.Id}/status", token);
@@ -366,7 +386,7 @@ public sealed class AdminApiTests : IAsyncLifetime
     {
         Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
         await InstallLicenseAsync();
-        await SeedUserAsync("alice", "correct horse battery staple");
+        await SeedUserAsync("alice", "correct horse battery staple", BuiltInRoles.ServerAdmin);
         var bob = await SeedUserAsync("bob", "another good long password");
 
         var adminToken = await LoginAsync("alice", "correct horse battery staple");
@@ -387,7 +407,7 @@ public sealed class AdminApiTests : IAsyncLifetime
     {
         Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
         await InstallLicenseAsync();
-        await SeedUserAsync("alice", "correct horse battery staple");
+        await SeedUserAsync("alice", "correct horse battery staple", BuiltInRoles.ServerAdmin);
         var token = await LoginAsync("alice", "correct horse battery staple");
 
         var response = await _client.SendAsync(Authed(HttpMethod.Post, "/api/admin/audit/verify", token));
@@ -401,7 +421,7 @@ public sealed class AdminApiTests : IAsyncLifetime
     {
         Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
         await InstallLicenseAsync();
-        await SeedUserAsync("alice", "correct horse battery staple");
+        await SeedUserAsync("alice", "correct horse battery staple", BuiltInRoles.ServerAdmin);
         var token = await LoginAsync("alice", "correct horse battery staple");
 
         using (var scope = _factory.Services.CreateScope())
@@ -417,5 +437,167 @@ public sealed class AdminApiTests : IAsyncLifetime
 
         Assert.Contains("\"valid\":false", body);
         Assert.Contains(ErrorCode.AuditChainVerificationFailed, body);
+    }
+
+    // ---- Authorization: the defect these tests exist to prevent regressing ----
+
+    /// <summary>
+    /// The critical finding from the security review: the admin filter authenticated but
+    /// never authorized, so any authenticated end user could manage accounts, revoke
+    /// sessions, and read the entire audit log.
+    /// </summary>
+    [SkippableTheory]
+    [InlineData("GET", "/api/admin/users")]
+    [InlineData("GET", "/api/admin/groups")]
+    [InlineData("GET", "/api/admin/sessions")]
+    [InlineData("GET", "/api/admin/audit")]
+    [InlineData("GET", "/api/admin/license")]
+    [InlineData("GET", "/api/admin/health")]
+    public async Task An_ordinary_user_is_refused_every_admin_read(string method, string url)
+    {
+        Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
+        await InstallLicenseAsync();
+        await SeedUserAsync("ordinary", "an ordinary user password");
+        var token = await LoginAsync("ordinary", "an ordinary user password");
+
+        var response = await _client.SendAsync(Authed(new HttpMethod(method), url, token));
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        var error = await response.Content.ReadFromJsonAsync<ErrorDto>();
+        Assert.Equal(ErrorCode.PermissionDenied, error!.Code);
+    }
+
+    [SkippableFact]
+    public async Task An_ordinary_user_cannot_create_a_user()
+    {
+        Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
+        await InstallLicenseAsync();
+        await SeedUserAsync("ordinary", "an ordinary user password");
+        var token = await LoginAsync("ordinary", "an ordinary user password");
+
+        var request = Authed(HttpMethod.Post, "/api/admin/users", token);
+        request.Content = JsonContent.Create(
+            new CreateUserRequest("backdoor", "Backdoor", null, "a strong initial password"));
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [SkippableFact]
+    public async Task An_ordinary_user_cannot_revoke_another_users_session()
+    {
+        Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
+        await InstallLicenseAsync();
+        await SeedUserAsync("ordinary", "an ordinary user password");
+        var victim = await SeedUserAsync("victim", "victim long password here");
+
+        var attackerToken = await LoginAsync("ordinary", "an ordinary user password");
+        await LoginAsync("victim", "victim long password here", device: "victim-device");
+
+        Guid victimSessionId;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<MessengerDbContext>();
+            victimSessionId = await db.Sessions.Where(x => x.UserId == victim.Id).Select(x => x.Id).FirstAsync();
+        }
+
+        var response = await _client.SendAsync(
+            Authed(HttpMethod.Delete, $"/api/admin/sessions/{victimSessionId}", attackerToken));
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    /// <summary>Reading the audit log discloses the whole organisation's activity.</summary>
+    [SkippableFact]
+    public async Task An_ordinary_user_cannot_read_the_audit_log()
+    {
+        Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
+        await InstallLicenseAsync();
+        await SeedUserAsync("ordinary", "an ordinary user password");
+        var token = await LoginAsync("ordinary", "an ordinary user password");
+
+        var response = await _client.SendAsync(Authed(HttpMethod.Get, "/api/admin/audit", token));
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.DoesNotContain("auth.login", await response.Content.ReadAsStringAsync());
+    }
+
+    [SkippableFact]
+    public async Task An_ordinary_user_cannot_install_a_licence()
+    {
+        Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
+        await InstallLicenseAsync();
+        await SeedUserAsync("ordinary", "an ordinary user password");
+        var token = await LoginAsync("ordinary", "an ordinary user password");
+
+        var request = Authed(HttpMethod.Post, "/api/admin/license", token);
+        request.Content = JsonContent.Create(new InstallLicenseRequest("anything"));
+
+        Assert.Equal(HttpStatusCode.Forbidden, (await _client.SendAsync(request)).StatusCode);
+    }
+
+    /// <summary>Separation of duties, verified at the HTTP boundary rather than only in the service.</summary>
+    [SkippableFact]
+    public async Task An_auditor_reads_the_audit_log_but_cannot_create_users()
+    {
+        Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
+        await InstallLicenseAsync();
+        await SeedUserAsync("auditor", "auditor long password here", BuiltInRoles.Auditor);
+        var token = await LoginAsync("auditor", "auditor long password here");
+
+        var read = await _client.SendAsync(Authed(HttpMethod.Get, "/api/admin/audit", token));
+        Assert.Equal(HttpStatusCode.OK, read.StatusCode);
+
+        var create = Authed(HttpMethod.Post, "/api/admin/users", token);
+        create.Content = JsonContent.Create(new CreateUserRequest("x", "X", null, "a strong initial password"));
+        Assert.Equal(HttpStatusCode.Forbidden, (await _client.SendAsync(create)).StatusCode);
+    }
+
+    [SkippableFact]
+    public async Task Help_desk_can_revoke_a_session_but_not_create_users()
+    {
+        Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
+        await InstallLicenseAsync();
+        await SeedUserAsync("helpdesk", "helpdesk long password", BuiltInRoles.HelpDesk);
+        var token = await LoginAsync("helpdesk", "helpdesk long password");
+
+        Assert.Equal(HttpStatusCode.OK,
+            (await _client.SendAsync(Authed(HttpMethod.Get, "/api/admin/sessions", token))).StatusCode);
+
+        var create = Authed(HttpMethod.Post, "/api/admin/users", token);
+        create.Content = JsonContent.Create(new CreateUserRequest("x", "X", null, "a strong initial password"));
+        Assert.Equal(HttpStatusCode.Forbidden, (await _client.SendAsync(create)).StatusCode);
+    }
+
+    /// <summary>A permission denial must reach the audit log, not just the caller.</summary>
+    [SkippableFact]
+    public async Task A_denied_admin_call_is_audited()
+    {
+        Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
+        await InstallLicenseAsync();
+        var ordinary = await SeedUserAsync("ordinary", "an ordinary user password");
+        var token = await LoginAsync("ordinary", "an ordinary user password");
+
+        await _client.SendAsync(Authed(HttpMethod.Get, "/api/admin/audit", token));
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MessengerDbContext>();
+        var denial = await db.AuditLog.FirstOrDefaultAsync(e => e.Action == "authz.deny" && e.ActorUserId == ordinary.Id);
+
+        Assert.NotNull(denial);
+        Assert.Contains(Permissions.AuditRead, denial!.DetailJson!);
+    }
+
+    /// <summary>Security headers are applied to responses.</summary>
+    [SkippableFact]
+    public async Task Security_headers_are_present()
+    {
+        Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
+
+        var response = await _client.GetAsync("/health/live");
+
+        Assert.Equal("nosniff", response.Headers.GetValues("X-Content-Type-Options").Single());
+        Assert.Equal("DENY", response.Headers.GetValues("X-Frame-Options").Single());
+        Assert.Contains("frame-ancestors 'none'", response.Headers.GetValues("Content-Security-Policy").Single());
     }
 }

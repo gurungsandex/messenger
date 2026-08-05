@@ -6,6 +6,9 @@ namespace Messenger.Data;
 public class MessengerDbContext(DbContextOptions<MessengerDbContext> options) : DbContext(options)
 {
     public DbSet<User> Users => Set<User>();
+    public DbSet<Role> Roles => Set<Role>();
+    public DbSet<RolePermission> RolePermissions => Set<RolePermission>();
+    public DbSet<UserRole> UserRoles => Set<UserRole>();
     public DbSet<Group> Groups => Set<Group>();
     public DbSet<GroupMember> GroupMembers => Set<GroupMember>();
     public DbSet<OrgUnit> OrgUnits => Set<OrgUnit>();
@@ -34,6 +37,31 @@ public class MessengerDbContext(DbContextOptions<MessengerDbContext> options) : 
             e.HasIndex(x => x.Username).IsUnique();
             e.HasIndex(x => x.AdObjectGuid).IsUnique().HasFilter("ad_object_guid IS NOT NULL");
             e.HasIndex(x => x.Status);
+        });
+
+        b.Entity<Role>(e =>
+        {
+            e.ToTable("roles");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Name).IsRequired().HasMaxLength(128);
+            e.HasIndex(x => x.Name).IsUnique();
+        });
+
+        b.Entity<RolePermission>(e =>
+        {
+            e.ToTable("role_permissions");
+            e.HasKey(x => new { x.RoleId, x.PermissionKey });
+            e.HasOne(x => x.Role).WithMany(r => r.Permissions).HasForeignKey(x => x.RoleId);
+            e.Property(x => x.PermissionKey).IsRequired().HasMaxLength(128);
+        });
+
+        b.Entity<UserRole>(e =>
+        {
+            e.ToTable("user_roles");
+            e.HasKey(x => new { x.UserId, x.RoleId });
+            e.HasOne(x => x.User).WithMany().HasForeignKey(x => x.UserId);
+            e.HasOne(x => x.Role).WithMany(r => r.Users).HasForeignKey(x => x.RoleId);
+            e.HasIndex(x => x.UserId);
         });
 
         b.Entity<Group>(e =>

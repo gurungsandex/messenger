@@ -14,14 +14,22 @@ public static class AdminApi
 {
     public static void MapAdminApi(this WebApplication app)
     {
-        var admin = app.MapGroup("/api/admin").AddEndpointFilter<AdminAuthFilter>();
+        var admin = app.MapGroup("/api/admin")
+            .AddEndpointFilter<AdminAuthFilter>()
+            .RequireRateLimiting("admin");
+
+        // Every route below declares the permission it needs. Authentication alone is not
+        // authorization: without this, any authenticated end user could manage accounts,
+        // revoke sessions, and read the entire audit log.
+        RouteHandlerBuilder Require(RouteHandlerBuilder route, string permission)
+            => route.AddEndpointFilter(new RequirePermissionFilter(permission));
 
         // ---- Users -------------------------------------------------------------------
 
         // Paging parameters are optional. Declared as required non-nullable ints, minimal-API
         // binding fails before the auth filter runs, so an unauthenticated caller would get a
         // 400 instead of a 401 -- an inconsistency that also tells them the endpoint exists.
-        admin.MapGet("/users", async (MessengerDbContext db, int? page, int? pageSize, CancellationToken ct) =>
+        Require(admin.MapGet("/users", async (MessengerDbContext db, int? page, int? pageSize, CancellationToken ct) =>
         {
             var size = Math.Clamp(pageSize ?? 50, 1, 200);
             var users = await db.Users
@@ -32,12 +40,13 @@ public static class AdminApi
                     u.Source.ToString(), u.Status.ToString(), u.LastLoginAt))
                 .ToListAsync(ct);
             return Results.Ok(users);
-        });
+        }), Permissions.UsersRead);
 
-        admin.MapPost("/users", async (
+        Require(admin.MapPost("/users", async (
             CreateUserRequest request, MessengerDbContext db, AuthService auth,
             LicenseEnforcementService license, AuditService audit,
-            SessionService sessions, HttpContext http, CancellationToken ct) =>
+            AuthorizationService authorization, SessionService sessions,
+            HttpContext http, CancellationToken ct) =>
         {
             var actorId = http.ActorId();
 
@@ -64,13 +73,17 @@ public static class AdminApi
             user.MustChangePassword = true;
             await db.SaveChangesAsync(ct);
 
+            // Without a role a new account can do nothing at all -- not even chat. Failing
+            // closed is right for administration but would be an outage for ordinary users.
+            await authorization.EnsureDefaultRoleAsync(user.Id, ct);
+
             await audit.AppendAsync("user.create", "success", actorId, "admin",
                 http.ClientIp(), "user", user.Id, null, ct);
 
             return Results.Created($"/api/admin/users/{user.Id}", new { user.Id });
-        });
+        }), Permissions.UsersCreate);
 
-        admin.MapPost("/users/{id:guid}/status", async (
+        Require(admin.MapPost("/users/{id:guid}/status", async (
             Guid id, SetStatusRequest request, MessengerDbContext db,
             LicenseEnforcementService license, SessionService sessions,
             AuditService audit, HttpContext http, CancellationToken ct) =>
@@ -102,49 +115,49 @@ public static class AdminApi
                 http.ClientIp(), "user", user.Id, $"{{\"status\":\"{target}\"}}", ct);
 
             return Results.NoContent();
-        });
+        }), Permissions.UsersSetStatus);
 
         // ---- Groups ------------------------------------------------------------------
 
-        admin.MapGet("/groups", async (MessengerDbContext db, CancellationToken ct) =>
+        Require(admin.MapGet("/groups", async (MessengerDbContext db, CancellationToken ct) =>
             Results.Ok(await db.Groups
                 .Where(g => g.DeletedAt == null)
                 .OrderBy(g => g.Name)
                 .Select(g => new GroupSummary(g.Id, g.Name, g.Description, g.Type.ToString(),
                     g.Source.ToString(), g.Status.ToString(), g.Members.Count))
-                .ToListAsync(ct)));
+                .ToListAsync(ct))), Permissions.GroupsRead);
 
-        admin.MapPost("/groups", async (
+        Require(admin.MapPost("/groups", async (
             CreateGroupRequest request, GroupService groups, HttpContext http, CancellationToken ct) =>
         {
             var group = await groups.CreateAsync(request.Name, request.Description, http.ActorId(), ct: ct);
             return Results.Created($"/api/admin/groups/{group.Id}", new { group.Id, group.ConversationId });
-        });
+        }), Permissions.GroupsManage);
 
-        admin.MapPost("/groups/{id:guid}/members/{userId:guid}", async (
+        Require(admin.MapPost("/groups/{id:guid}/members/{userId:guid}", async (
             Guid id, Guid userId, GroupService groups, HttpContext http, CancellationToken ct) =>
         {
             await groups.AddMemberAsync(id, userId, http.ActorId(), ct: ct);
             return Results.NoContent();
-        });
+        }), Permissions.GroupsMembership);
 
-        admin.MapDelete("/groups/{id:guid}/members/{userId:guid}", async (
+        Require(admin.MapDelete("/groups/{id:guid}/members/{userId:guid}", async (
             Guid id, Guid userId, GroupService groups, HttpContext http, CancellationToken ct) =>
         {
             await groups.RemoveMemberAsync(id, userId, http.ActorId(), ct);
             return Results.NoContent();
-        });
+        }), Permissions.GroupsMembership);
 
-        admin.MapPost("/groups/{id:guid}/move/{userId:guid}/to/{targetId:guid}", async (
+        Require(admin.MapPost("/groups/{id:guid}/move/{userId:guid}/to/{targetId:guid}", async (
             Guid id, Guid userId, Guid targetId, GroupService groups, HttpContext http, CancellationToken ct) =>
         {
             await groups.MoveMemberAsync(id, targetId, userId, http.ActorId(), ct);
             return Results.NoContent();
-        });
+        }), Permissions.GroupsMembership);
 
         // ---- Directory sync ----------------------------------------------------------
 
-        admin.MapPost("/directory/sync", async (
+        Require(admin.MapPost("/directory/sync", async (
             DirectorySyncService sync, LicenseEnforcementService license,
             MessengerDbContext db, CancellationToken ct) =>
         {
@@ -164,11 +177,11 @@ public static class AdminApi
 
             await db.SaveChangesAsync(ct);
             return Results.Ok(report);
-        });
+        }), Permissions.DirectorySync);
 
         // ---- Sessions ----------------------------------------------------------------
 
-        admin.MapGet("/sessions", async (MessengerDbContext db, TimeProvider time, CancellationToken ct) =>
+        Require(admin.MapGet("/sessions", async (MessengerDbContext db, TimeProvider time, CancellationToken ct) =>
         {
             var now = time.GetUtcNow();
             return Results.Ok(await db.Sessions
@@ -177,9 +190,9 @@ public static class AdminApi
                 .Select(s => new SessionSummary(s.Id, s.UserId, s.User.Username, s.DeviceName,
                     s.IpAddress, s.AuthMethod.ToString(), s.CreatedAt, s.LastActivityAt))
                 .ToListAsync(ct));
-        });
+        }), Permissions.SessionsRead);
 
-        admin.MapDelete("/sessions/{id:guid}", async (
+        Require(admin.MapDelete("/sessions/{id:guid}", async (
             Guid id, MessengerDbContext db, SessionService sessions,
             AuditService audit, HttpContext http, CancellationToken ct) =>
         {
@@ -191,11 +204,11 @@ public static class AdminApi
                 http.ClientIp(), "session", id, null, ct);
 
             return Results.NoContent();
-        });
+        }), Permissions.SessionsRevoke);
 
         // ---- Licence -----------------------------------------------------------------
 
-        admin.MapGet("/license", async (LicenseEnforcementService license, CancellationToken ct) =>
+        Require(admin.MapGet("/license", async (LicenseEnforcementService license, CancellationToken ct) =>
         {
             var usage = await license.GetUsageAsync(ct);
             return Results.Ok(new
@@ -213,19 +226,19 @@ public static class AdminApi
                 nearSeatLimit = usage.IsNearSeatLimit,
                 features = usage.Status.Payload?.Features ?? [],
             });
-        });
+        }), Permissions.LicenseRead);
 
-        admin.MapPost("/license", async (
+        Require(admin.MapPost("/license", async (
             InstallLicenseRequest request, LicenseEnforcementService license,
             HttpContext http, CancellationToken ct) =>
         {
             var status = await license.InstallAsync(request.LicenseFile, http.ActorId(), ct);
             return Results.Ok(new { state = status.State.ToString(), detail = status.Detail });
-        });
+        }), Permissions.LicenseInstall);
 
         // ---- Audit -------------------------------------------------------------------
 
-        admin.MapGet("/audit", async (MessengerDbContext db, long? fromId, int? limit, CancellationToken ct) =>
+        Require(admin.MapGet("/audit", async (MessengerDbContext db, long? fromId, int? limit, CancellationToken ct) =>
         {
             var take = Math.Clamp(limit ?? 100, 1, 500);
             var from = fromId ?? 0;
@@ -235,9 +248,9 @@ public static class AdminApi
                 .Select(e => new AuditEntrySummary(e.Id, e.OccurredAt, e.ActorUserId, e.ActorTier,
                     e.ActorIp, e.Action, e.TargetType, e.TargetId, e.Outcome, e.DetailJson))
                 .ToListAsync(ct));
-        });
+        }), Permissions.AuditRead);
 
-        admin.MapPost("/audit/verify", async (AuditService audit, CancellationToken ct) =>
+        Require(admin.MapPost("/audit/verify", async (AuditService audit, CancellationToken ct) =>
         {
             var result = await audit.VerifyAsync(ct: ct);
             return Results.Ok(new
@@ -246,11 +259,11 @@ public static class AdminApi
                 firstInvalidEntryId = result.FirstInvalidEntryId,
                 code = result.IsValid ? null : ErrorCode.AuditChainVerificationFailed,
             });
-        });
+        }), Permissions.AuditVerify);
 
         // ---- Health ------------------------------------------------------------------
 
-        admin.MapGet("/health", async (
+        Require(admin.MapGet("/health", async (
             MessengerDbContext db, IConnectionRegistry registry,
             LicenseEnforcementService license, TimeProvider time, CancellationToken ct) =>
         {
@@ -266,7 +279,7 @@ public static class AdminApi
                 license = (await license.GetStatusAsync(ct)).State.ToString(),
                 serverTime = now,
             });
-        });
+        }), Permissions.ServerHealth);
     }
 
     private static IResult Problem(string code, string message)
@@ -317,6 +330,47 @@ public sealed class AdminAuthFilter(SessionService sessions) : IEndpointFilter
                 statusCode: StatusCodes.Status401Unauthorized);
 
         http.Items["ActorId"] = validation.Session.UserId;
+        return await next(context);
+    }
+}
+
+/// <summary>
+/// Enforces a single permission on a route. Runs after <see cref="AdminAuthFilter"/>, so an
+/// actor is always present by the time it executes.
+///
+/// The permission is re-checked per request rather than cached in the session, so removing
+/// a role takes effect on the actor's very next call rather than whenever their session
+/// happens to expire.
+/// </summary>
+public sealed class RequirePermissionFilter(string permission) : IEndpointFilter
+{
+    public async ValueTask<object?> InvokeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+    {
+        var http = context.HttpContext;
+        var actorId = http.ActorId();
+
+        if (actorId == Guid.Empty)
+        {
+            return Results.Json(new ErrorDto(ErrorCode.SessionTokenInvalid, "Authentication required.", null),
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        var authorization = http.RequestServices.GetRequiredService<AuthorizationService>();
+
+        if (!await authorization.HasPermissionAsync(actorId, permission, http.RequestAborted))
+        {
+            var audit = http.RequestServices.GetRequiredService<AuditService>();
+            await audit.AppendAsync("authz.deny", "denied", actorId, "admin", http.ClientIp(),
+                null, null, $"{{\"permission\":\"{permission}\"}}", http.RequestAborted);
+
+            // 403 rather than 404: the caller is authenticated, and pretending the endpoint
+            // does not exist would not hide anything they cannot already infer.
+            return Results.Json(
+                new ErrorDto(ErrorCode.PermissionDenied,
+                    $"This action requires the '{permission}' permission.", null),
+                statusCode: StatusCodes.Status403Forbidden);
+        }
+
         return await next(context);
     }
 }

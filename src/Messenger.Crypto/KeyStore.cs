@@ -161,6 +161,53 @@ public sealed class PassphraseKeyStoreProvider : IKeyStoreProvider, IDisposable
 }
 
 /// <summary>
+/// Loads the root KEK from an escrow file on disk, creating it on first run.
+///
+/// This exists because generating a KEK per process is catastrophic: every message and file
+/// encrypted before a restart becomes permanently unreadable, and a routine service restart
+/// silently destroys all history. A key store must outlive the process that uses it.
+///
+/// The passphrase comes from configuration or an environment variable, never from the file
+/// beside the blob. On Windows the DPAPI-NG or TPM provider is preferred — this one keeps
+/// the unwrapped KEK in process memory — but it is a correct, durable store and is what
+/// makes non-Windows deployment possible at all.
+/// </summary>
+public static class FileBackedKeyStore
+{
+    /// <summary>
+    /// Opens the escrow at <paramref name="path"/>, or creates and writes one if absent.
+    /// Returns whether it was newly created, so the caller can tell the operator to back it up.
+    /// </summary>
+    public static (PassphraseKeyStoreProvider Provider, bool Created) OpenOrCreate(string path, string passphrase)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        ArgumentException.ThrowIfNullOrWhiteSpace(passphrase);
+
+        if (File.Exists(path))
+            return (PassphraseKeyStoreProvider.FromEscrow(File.ReadAllBytes(path), passphrase), false);
+
+        var provider = PassphraseKeyStoreProvider.Create();
+        var escrow = provider.ExportEscrow(passphrase);
+
+        var directory = Path.GetDirectoryName(Path.GetFullPath(path));
+        if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+
+        // Write to a temporary file and move into place, so an interrupted first run cannot
+        // leave a truncated escrow that would make the KEK unrecoverable.
+        var temporary = path + ".tmp";
+        File.WriteAllBytes(temporary, escrow);
+        File.Move(temporary, path, overwrite: false);
+
+        // Re-open from what was actually written, rather than trusting the in-memory copy.
+        // If the file cannot be read back, that must fail now — not at the first restore.
+        var verified = PassphraseKeyStoreProvider.FromEscrow(File.ReadAllBytes(path), passphrase);
+        provider.Dispose();
+
+        return (verified, true);
+    }
+}
+
+/// <summary>
 /// AES Key Wrap (RFC 3394). .NET exposes no managed AES-KW, so the algorithm is implemented
 /// here directly on top of the raw AES block cipher. Unwrap validates the RFC's fixed
 /// integrity check value, which is what makes a corrupted or foreign wrapped key detectable.

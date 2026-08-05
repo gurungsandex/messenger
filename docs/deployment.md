@@ -184,11 +184,43 @@ from 30 days out. After grace, all logins are refused (`LIC-110`).
 {
   "ConnectionStrings": { "Messenger": "Host=db;Database=messenger;Username=messenger;Password=...;SslMode=VerifyFull" },
   "Licensing": { "VendorPublicKey": "<base64>" },
-  "KeyStore": { "Provider": "Tpm" },
+  "KeyStore": {
+    "EscrowPath": "D:\\MessengerKeys\\root.escrow",   // REQUIRED — back this file up
+    "Passphrase": "<from environment, never this file>"  // REQUIRED — server refuses to start without it
+  },
   "FileStore": { "RootPath": "D:\\MessengerFiles" },
   "Kestrel": { "Endpoints": { "Https": { "Url": "https://0.0.0.0:8443" } } }
 }
 ```
+
+**`KeyStore:Passphrase` is mandatory and the server will not start without it.** That is
+deliberate: the alternative was a key generated per process, which silently made all history
+unreadable at the first restart. Supply it as an environment variable
+(`KeyStore__Passphrase`) or via Windows-protected configuration, never in this file.
+
+On first start the server creates the escrow at `KeyStore:EscrowPath` and logs a warning.
+**Back up that file and its passphrase before putting the server into service** — see
+section 9.
+
+### Roles
+
+Five roles are seeded automatically at every start and reconciled to the current definition,
+so a permission added in a new release reaches existing deployments on upgrade:
+
+| Role | Grants |
+| --- | --- |
+| `ServerAdmin` | Everything server-side, including licence installation and directory sync |
+| `UserAdmin` | Users and groups; **not** licence, server settings, or directory sync |
+| `Auditor` | Reads and verifies the audit log; manages nobody |
+| `HelpDesk` | Views users and sessions, can sign a user out |
+| `User` | Chat and file transfer only — no administrative access whatsoever |
+
+New accounts receive `User` automatically. **An account with no role can do nothing at all**,
+which is the intended failure mode for administration but would be an outage for an ordinary
+user, so account creation and directory sync both assign it.
+
+`Auditor` exists so an organisation can separate duties: read the evidence without the
+ability to change what it records. The last `ServerAdmin` cannot be demoted.
 
 Secrets never belong in configuration files in production — use environment variables or
 Windows-protected configuration. The server refuses to start with a named key if required
