@@ -125,14 +125,67 @@ public sealed class MessageService(
             throw new MessengerException(ErrorCode.GroupDisabled,
                 "This group is deactivated and is not accepting messages.");
 
-        // A retry carrying the same client id must return the original ack, not duplicate.
+        var recipientIds = participants.Where(p => p.UserId != senderId).Select(p => p.UserId).ToList();
+
+        // Sequence numbers are allocated from the conversation row and made unique by the
+        // index on (conversation_id, seq), which two simultaneous senders will contend for:
+        // both read the same NextSeq, both insert it, and the loser's insert violates the
+        // index. Left unhandled that reaches a legitimate user as a 500 on an ordinary
+        // message — and the busier the conversation, the likelier it is.
+        //
+        // The index is the arbiter rather than an application-level check, so the recovery
+        // is to re-read and retry. Each attempt has one winner, so the loop converges; the
+        // same pattern guards the direct-conversation create above.
+        for (int attempt = 0; ; attempt++)
+        {
+            var duplicate = await FindByClientIdAsync(senderId, request, ct);
+            if (duplicate is not null) return duplicate;
+
+            try
+            {
+                return await TryAppendAsync(senderId, request, recipientIds, ct);
+            }
+            catch (Exception ex) when (ex is DbUpdateException or DbUpdateConcurrencyException
+                                       && attempt < MaxSequenceAllocationAttempts)
+            {
+                // Nothing from the failed attempt survives — SaveChanges is transactional, so
+                // the message, its delivery rows and the sequence bump all rolled back
+                // together. The tracker still holds them, and re-reading with those entries
+                // attached would return the stale NextSeq that lost the race.
+                db.ChangeTracker.Clear();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Bounded so a genuine, non-contention write failure surfaces as itself rather than
+    /// spinning. Contention needs far fewer attempts than this: each round has a winner, so
+    /// N concurrent senders drain in N rounds even in the worst ordering.
+    /// </summary>
+    private const int MaxSequenceAllocationAttempts = 8;
+
+    /// <summary>A retry carrying the same client id must return the original ack, not duplicate.</summary>
+    private async Task<SendMessageAck?> FindByClientIdAsync(
+        Guid senderId, SendMessageRequest request, CancellationToken ct)
+    {
         var existing = await db.Messages.FirstOrDefaultAsync(
             m => m.ConversationId == request.ConversationId
                  && m.SenderId == senderId
                  && m.ClientMessageId == request.ClientMessageId, ct);
-        if (existing is not null)
-            return new SendMessageAck(existing.Id, existing.ClientMessageId, existing.Seq, existing.ServerReceivedAt);
 
+        return existing is null
+            ? null
+            : new SendMessageAck(existing.Id, existing.ClientMessageId, existing.Seq, existing.ServerReceivedAt);
+    }
+
+    /// <summary>
+    /// One attempt at appending: claim the next sequence number, seal the body, and write.
+    /// Everything it touches is re-read on entry, so a retry after a lost race works from
+    /// the conversation's current state rather than the state that lost.
+    /// </summary>
+    private async Task<SendMessageAck> TryAppendAsync(
+        Guid senderId, SendMessageRequest request, List<Guid> recipientIds, CancellationToken ct)
+    {
         var conversation = await db.Conversations.FirstAsync(c => c.Id == request.ConversationId, ct);
         var key = await GetOrCreateActiveKeyAsync(conversation, ct);
 
@@ -170,8 +223,8 @@ public sealed class MessageService(
         // A delivery row is written for every participant regardless of whether they are
         // online. That is the whole of store-and-forward: the backlog is a query over
         // persisted state, so a server restart loses nothing.
-        foreach (var p in participants.Where(p => p.UserId != senderId))
-            message.Recipients.Add(new MessageRecipient { UserId = p.UserId, State = DeliveryState.Pending });
+        foreach (var recipientId in recipientIds)
+            message.Recipients.Add(new MessageRecipient { UserId = recipientId, State = DeliveryState.Pending });
 
         conversation.NextSeq = seq + 1;
         conversation.LastMessageAt = now;

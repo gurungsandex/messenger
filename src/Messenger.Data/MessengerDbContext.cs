@@ -132,9 +132,16 @@ public class MessengerDbContext(DbContextOptions<MessengerDbContext> options) : 
             e.ToTable("message_recipients");
             e.HasKey(x => new { x.MessageId, x.UserId });
             e.HasOne(x => x.Message).WithMany(m => m.Recipients).HasForeignKey(x => x.MessageId);
-            // Partial index: the store-and-forward backlog query touches only genuinely
-            // undelivered rows, so it stays cheap as this table grows past every other one.
-            e.HasIndex(x => new { x.UserId, x.State });
+
+            // Genuinely partial. This table grows past every other one — a row per recipient
+            // per message, kept forever — while the rows anyone queries by user are only the
+            // undelivered ones: the backlog on reconnect, the discard on group removal, the
+            // console's pending count. Everything else reaches a row by its primary key.
+            //
+            // Covering all three states indexed the whole history to serve a set that in a
+            // healthy deployment is nearly empty, so the index grew without bound and the
+            // query it exists for got slower every day the server ran.
+            e.HasIndex(x => new { x.UserId, x.State }).HasFilter("state = 0");
         });
 
         b.Entity<ConversationKey>(e =>

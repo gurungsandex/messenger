@@ -196,6 +196,13 @@ public static class FileBackedKeyStore
         // leave a truncated escrow that would make the KEK unrecoverable.
         var temporary = path + ".tmp";
         File.WriteAllBytes(temporary, escrow);
+
+        // Restricted before the move, so the blob is never briefly world-readable at its
+        // final name. The passphrase is what actually protects it, but a file holding the
+        // root key of every message and file in the deployment should not be sitting at the
+        // default 0644 where any local account can copy it and attack it offline at leisure.
+        RestrictToOwner(temporary);
+
         File.Move(temporary, path, overwrite: false);
 
         // Re-open from what was actually written, rather than trusting the in-memory copy.
@@ -204,6 +211,30 @@ public static class FileBackedKeyStore
         provider.Dispose();
 
         return (verified, true);
+    }
+
+    /// <summary>
+    /// Narrows a file to owner read/write.
+    ///
+    /// Unix only. Windows has no equivalent mode bits, and a new file there inherits the
+    /// directory's ACL — so the protection is the ACL on the key store directory, which
+    /// docs/deployment.md section 6 covers. Best-effort: a file system that cannot express
+    /// permissions is a reason to warn, not a reason to refuse to start and leave the server
+    /// with no key store at all.
+    /// </summary>
+    private static void RestrictToOwner(string path)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        try
+        {
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            // Left at the default mode. Callers surface the escrow path on creation, which
+            // is where an operator is already being told to secure and back it up.
+        }
     }
 }
 

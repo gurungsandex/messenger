@@ -251,6 +251,79 @@ public sealed class AdminApiTests : IAsyncLifetime
         Assert.Equal(ErrorCode.InvalidCredentials, error!.Code);
     }
 
+    /// <summary>
+    /// Liveness answers "is the process up", readiness "can it serve a request". They are
+    /// separate because an orchestrator restarts what fails liveness, and restarting does
+    /// not fix an unreachable database — it only adds an outage on top of one.
+    /// </summary>
+    [SkippableFact]
+    public async Task Both_health_probes_answer_without_authentication()
+    {
+        Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
+
+        Assert.Equal(HttpStatusCode.OK, (await _client.GetAsync("/health/live")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _client.GetAsync("/health/ready")).StatusCode);
+    }
+
+    /// <summary>
+    /// Readiness has to actually reach the database. A probe that reports Healthy from a
+    /// server whose every request 500s is worse than no probe: it keeps the load balancer
+    /// confidently sending traffic to an instance that cannot serve any of it.
+    ///
+    /// The database is dropped after the host is up, because that is the case the probe
+    /// exists for — the server already refuses to *start* without one. Liveness has to keep
+    /// passing throughout: restarting the process does not bring the database back.
+    /// </summary>
+    [SkippableFact]
+    public async Task Readiness_fails_when_the_database_goes_away()
+    {
+        Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
+
+        Assert.Equal(HttpStatusCode.OK, (await _client.GetAsync("/health/ready")).StatusCode);
+
+        NpgsqlConnection.ClearAllPools();
+        var admin = new NpgsqlConnectionStringBuilder(BaseConnection!) { Database = "postgres" };
+        await using (var drop = new NpgsqlConnection(admin.ConnectionString))
+        {
+            await drop.OpenAsync();
+            await using var cmd = drop.CreateCommand();
+            cmd.CommandText = $"DROP DATABASE \"{_database}\" WITH (FORCE)";
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await _client.GetAsync("/health/ready")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _client.GetAsync("/health/live")).StatusCode);
+    }
+
+    /// <summary>
+    /// X-Forwarded-For must be ignored unless an operator has said a proxy is in front.
+    /// Honouring it by default would let any caller choose the address that lands in the
+    /// audit log and the address the per-IP login limiter counts against.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_spoofed_forwarded_address_does_not_reach_the_audit_log()
+    {
+        Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
+        await InstallLicenseAsync();
+        await SeedUserAsync("alice", "correct horse battery staple", BuiltInRoles.ServerAdmin);
+
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/login")
+        {
+            Content = JsonContent.Create(
+                new LoginRequest("alice", "correct horse battery staple", "device-1", null)),
+        };
+        request.Headers.Add("X-Forwarded-For", "203.0.113.99");
+        Assert.Equal(HttpStatusCode.OK, (await _client.SendAsync(request)).StatusCode);
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MessengerDbContext>();
+        var entry = await db.AuditLog
+            .Where(e => e.Action == "auth.login" && e.Outcome == "success")
+            .OrderByDescending(e => e.Id).FirstAsync();
+
+        Assert.NotEqual("203.0.113.99", entry.ActorIp);
+    }
+
     [SkippableFact]
     public async Task Admin_endpoints_reject_an_unauthenticated_caller()
     {
@@ -361,6 +434,85 @@ public sealed class AdminApiTests : IAsyncLifetime
         var response = await _client.SendAsync(request);
 
         Assert.NotEqual(HttpStatusCode.Created, response.StatusCode);
+    }
+
+    [SkippableFact]
+    public async Task A_rejected_password_leaves_no_account_behind()
+    {
+        Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
+        await InstallLicenseAsync();
+        await SeedUserAsync("alice", "correct horse battery staple", BuiltInRoles.ServerAdmin);
+        var token = await LoginAsync("alice", "correct horse battery staple");
+
+        var request = Authed(HttpMethod.Post, "/api/admin/users", token);
+        request.Content = JsonContent.Create(new CreateUserRequest("bob", "Bob", null, "short"));
+        var response = await _client.SendAsync(request);
+
+        Assert.NotEqual(HttpStatusCode.Created, response.StatusCode);
+
+        // The account must not exist at all. Creating the row first and validating the
+        // password afterwards left a real user with no password hash, no role, and a
+        // consumed licence seat — none of which any error message mentioned.
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MessengerDbContext>();
+        Assert.False(await db.Users.AnyAsync(u => u.Username == "bob"));
+    }
+
+    [SkippableTheory]
+    [InlineData("", "Bob")]
+    [InlineData("   ", "Bob")]
+    [InlineData("bob", "")]
+    public async Task Creating_a_user_rejects_a_missing_name(string username, string displayName)
+    {
+        Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
+        await InstallLicenseAsync();
+        await SeedUserAsync("alice", "correct horse battery staple", BuiltInRoles.ServerAdmin);
+        var token = await LoginAsync("alice", "correct horse battery staple");
+
+        var request = Authed(HttpMethod.Post, "/api/admin/users", token);
+        request.Content = JsonContent.Create(
+            new CreateUserRequest(username, displayName, null, "a strong initial password"));
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [SkippableFact]
+    public async Task An_over_long_username_is_a_bad_request_not_a_server_error()
+    {
+        Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
+        await InstallLicenseAsync();
+        await SeedUserAsync("alice", "correct horse battery staple", BuiltInRoles.ServerAdmin);
+        var token = await LoginAsync("alice", "correct horse battery staple");
+
+        var request = Authed(HttpMethod.Post, "/api/admin/users", token);
+        request.Content = JsonContent.Create(new CreateUserRequest(
+            new string('u', 257), "Bob", null, "a strong initial password"));
+        var response = await _client.SendAsync(request);
+
+        // Left to the database this is a DbUpdateException, which reaches the caller as an
+        // opaque 500 with a correlation id and no indication of what to fix.
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var error = await response.Content.ReadFromJsonAsync<ErrorDto>();
+        Assert.Equal(ErrorCode.MalformedRequest, error!.Code);
+    }
+
+    [SkippableFact]
+    public async Task An_unrecognised_status_is_a_bad_request_not_a_server_error()
+    {
+        Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
+        await InstallLicenseAsync();
+        await SeedUserAsync("alice", "correct horse battery staple", BuiltInRoles.ServerAdmin);
+        var bob = await SeedUserAsync("bob", "another good long password");
+        var token = await LoginAsync("alice", "correct horse battery staple");
+
+        var request = Authed(HttpMethod.Post, $"/api/admin/users/{bob.Id}/status", token);
+        request.Content = JsonContent.Create(new SetStatusRequest("Bananas"));
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var error = await response.Content.ReadFromJsonAsync<ErrorDto>();
+        Assert.Equal(ErrorCode.MalformedRequest, error!.Code);
     }
 
     [SkippableFact]

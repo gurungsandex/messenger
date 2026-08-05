@@ -414,6 +414,30 @@ public class AuditChainTests
         Assert.False((await h.Audit.VerifyAsync()).IsValid);
     }
 
+    /// <summary>
+    /// The failed-login entry embeds the attempted username in its detail field. Escaping
+    /// only quote and backslash left raw control characters in place, which JSON forbids —
+    /// so a username containing a newline produced a detail field no parser accepts, and
+    /// because the field is hashed into the chain the malformed entry is permanent.
+    /// </summary>
+    [Theory]
+    [InlineData("bob\nadmin")]
+    [InlineData("bob\"; DROP--")]
+    [InlineData("bob\\admin")]
+    [InlineData("bob admin")]
+    [InlineData("bob\tadmin")]
+    public async Task An_unknown_username_is_audited_as_valid_json(string username)
+    {
+        using var h = new TestHarness();
+
+        await h.Auth.AuthenticateAsync(username, "irrelevant");
+
+        var entry = await h.Db.AuditLog.SingleAsync(e => e.Action == "auth.login");
+        using var parsed = System.Text.Json.JsonDocument.Parse(entry.DetailJson!);
+        Assert.Equal(username, parsed.RootElement.GetProperty("username").GetString());
+        Assert.Equal("not_found", parsed.RootElement.GetProperty("reason").GetString());
+    }
+
     [Fact]
     public async Task Verification_throws_with_the_catalogue_code()
     {

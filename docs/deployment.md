@@ -202,6 +202,12 @@ On first start the server creates the escrow at `KeyStore:EscrowPath` and logs a
 **Back up that file and its passphrase before putting the server into service** — see
 section 9.
 
+The file is created restricted to its owner (`0600` on Unix). Windows has no equivalent mode
+bits and a new file inherits the directory's ACL, so **restrict the key store directory
+itself** — the service account and administrators only. The passphrase is what actually
+protects the blob, but a file holding the root key of every message and file in the
+deployment should not be one that any local account can copy and attack offline at leisure.
+
 ### Roles
 
 Five roles are seeded automatically at every start and reconciled to the current definition,
@@ -278,15 +284,57 @@ specifically so a single-version rollback stays possible.
 
 ## 11. Health monitoring
 
-| Endpoint | Purpose |
-| --- | --- |
-| `/health/live` | Process is running |
-| `/health/ready` | Dependencies reachable |
-| `/api/admin/health` | Sessions, users, messages, pending deliveries, licence state |
+| Endpoint | Auth | Purpose |
+| --- | --- | --- |
+| `/health/live` | none | Process is running. Checks nothing else, deliberately. |
+| `/health/ready` | none | Database reachable. `200` ready, `503` not. |
+| `/api/admin/health` | `server.health` | Sessions, users, messages, pending deliveries, licence state |
+
+**Point the load balancer at `/health/ready`, and an orchestrator's restart policy at
+`/health/live`.** They are not interchangeable. Liveness answers "is this process up" and
+checks nothing beyond that, because the response to a failed liveness check is a restart —
+and restarting the server does not bring back a database that has gone away, it just adds an
+outage on top of one. Readiness answers "can this instance serve a request", which is the
+question that should decide whether traffic is sent here.
+
+Neither probe requires authentication, and both return only a status word — no version, no
+dependency detail, nothing that helps someone who should not be reaching them. Restrict
+them at the reverse proxy if they need not be public.
 
 Worth alerting on: licence expiry approaching, seat usage above 90%, pending-delivery
 backlog growth, audit checkpoint signing failures (`SRV-306`), and any audit chain
 verification failure (`SRV-305` — treat as a security incident).
+
+### Running behind a reverse proxy
+
+If anything terminates TLS or forwards traffic in front of the server — IIS ARR, nginx,
+HAProxy, a hardware load balancer — configure this. Without it every connection appears to
+come from the proxy, which has two consequences worth understanding:
+
+- **The audit log records the proxy's address on every entry**, so it cannot answer "where
+  from", which is much of what it is for.
+- **The per-source login rate limiter collapses into a single bucket** shared by the whole
+  organisation. Ten failed sign-ins from anyone locks out everyone.
+
+```jsonc
+{
+  "ForwardedHeaders": {
+    "Enabled": true,
+    // At least one of these must name the proxy, or the headers are ignored.
+    "KnownProxies": ["10.20.0.5"],
+    "KnownNetworks": ["10.20.0.0/24"]
+  }
+}
+```
+
+**Leave `Enabled` false when there is no proxy.** Honouring `X-Forwarded-For` with nothing
+in front lets any client choose its own apparent address and walk straight past both the
+audit trail and the rate limiter — the failure it would cause is worse than the one it
+fixes, which is why it is opt-in rather than on by default.
+
+Only the hops named above are trusted; the framework defaults that trust loopback are
+cleared. Enabling the feature and naming no proxy logs a warning at startup — that
+combination looks configured and does nothing.
 
 ---
 

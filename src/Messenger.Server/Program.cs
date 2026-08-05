@@ -4,8 +4,11 @@ using Messenger.Data;
 using Messenger.Licensing;
 using Messenger.Core;
 using Messenger.Server;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -106,7 +109,56 @@ builder.Services.AddSingleton<IFileStore>(_ => new LocalFileStore(
     ?? Path.Combine(AppContext.BaseDirectory, "filestore")));
 builder.Services.AddScoped<PresenceService>();
 
-builder.Services.AddHealthChecks();
+// Liveness answers "is this process up"; readiness answers "can it actually serve a
+// request", which for this server means the database is reachable. A load balancer given
+// only the first will keep sending traffic to an instance whose every request 500s.
+builder.Services.AddHealthChecks()
+    .AddCheck<DatabaseHealthCheck>("database", tags: ["ready"]);
+
+// Behind a reverse proxy every connection appears to come from the proxy. Left uncorrected
+// that puts the proxy's address on every audit entry and collapses the per-IP login rate
+// limiter into a single bucket shared by the whole organisation — so ten failed logins from
+// anyone locks out everyone.
+//
+// Opt-in, because the opposite failure is worse: honouring X-Forwarded-For with no proxy in
+// front lets any caller set their own apparent address and walk straight past both.
+if (builder.Configuration.GetValue("ForwardedHeaders:Enabled", false))
+{
+    builder.Services.Configure<ForwardedHeadersOptions>(options =>
+    {
+        options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+
+        // Cleared because the defaults trust loopback unconditionally. Only the proxies an
+        // operator names are trusted; naming none means the headers are ignored, which is
+        // the safe reading of an incomplete configuration.
+        options.KnownProxies.Clear();
+        options.KnownNetworks.Clear();
+
+        foreach (var proxy in builder.Configuration.GetSection("ForwardedHeaders:KnownProxies").Get<string[]>() ?? [])
+        {
+            if (System.Net.IPAddress.TryParse(proxy, out var address)) options.KnownProxies.Add(address);
+            else throw new InvalidOperationException(
+                $"{ErrorCode.ConfigurationInvalid}: 'ForwardedHeaders:KnownProxies' contains '{proxy}', "
+                + "which is not an IP address.");
+        }
+
+        foreach (var network in builder.Configuration.GetSection("ForwardedHeaders:KnownNetworks").Get<string[]>() ?? [])
+        {
+            var parts = network.Split('/');
+            if (parts.Length == 2 && System.Net.IPAddress.TryParse(parts[0], out var prefix)
+                                  && int.TryParse(parts[1], out var length))
+            {
+                options.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(prefix, length));
+            }
+            else
+            {
+                throw new InvalidOperationException(
+                    $"{ErrorCode.ConfigurationInvalid}: 'ForwardedHeaders:KnownNetworks' contains '{network}', "
+                    + "which is not CIDR notation such as '10.0.0.0/8'.");
+            }
+        }
+    });
+}
 
 // Per-user and per-IP limits. Sign-in is limited far more tightly than ordinary traffic:
 // it is the endpoint an attacker actually attacks, and unlike the rest it is reachable
@@ -152,6 +204,27 @@ if (isProduction)
 
 var app = builder.Build();
 
+// First in the pipeline: everything downstream that reads the client address — the audit
+// log, the rate limiter, HTTPS redirection — must see the corrected value, not the proxy's.
+if (builder.Configuration.GetValue("ForwardedHeaders:Enabled", false))
+{
+    app.UseForwardedHeaders();
+
+    var forwardedOptions = app.Services
+        .GetRequiredService<Microsoft.Extensions.Options.IOptions<ForwardedHeadersOptions>>().Value;
+
+    // Enabling the feature and naming no proxy is the one combination that looks configured
+    // and does nothing: the headers arrive, no hop is trusted, and every audit entry keeps
+    // the proxy's address. Silence here reads as "working", so it is said out loud.
+    if (forwardedOptions.KnownProxies.Count == 0 && forwardedOptions.KnownNetworks.Count == 0)
+    {
+        app.Logger.LogWarning(
+            "'ForwardedHeaders:Enabled' is set but neither 'KnownProxies' nor 'KnownNetworks' names "
+            + "a trusted hop, so forwarded headers are ignored and the client address on every audit "
+            + "entry will be the proxy's. List the reverse proxy under one of them.");
+    }
+}
+
 app.UseMessengerErrorHandling();
 
 if (isProduction)
@@ -191,7 +264,15 @@ using (var scope = app.Services.CreateScope())
     }
 }
 
-app.MapHealthChecks("/health/live");
+// Liveness deliberately checks nothing: an orchestrator restarts a container that fails it,
+// and restarting the server does not fix an unreachable database — it just adds an outage.
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
+
+// Readiness is the one a load balancer should use to decide whether to send traffic here.
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready"),
+});
 app.MapHub<ChatHub>("/hubs/chat");
 app.MapAdminApi();
 
@@ -253,9 +334,38 @@ app.MapPost("/api/auth/logout", async (
         await sessions.RevokeAsync(validation.Session, "logout", ct);
 
     return Results.NoContent();
-});
+})
+// Rate-limited like the rest of the authenticated surface. It does a token lookup before it
+// knows who is calling, so leaving it open makes it the cheapest unauthenticated way to put
+// load on the database.
+.RequireRateLimiting("admin");
 
 app.Run();
+
+/// <summary>
+/// Readiness: can this instance actually serve a request?
+///
+/// Every endpoint but the health checks themselves needs the database, so its reachability
+/// is the whole of the answer. Reported as Unhealthy rather than thrown, so the probe
+/// returns a 503 an orchestrator understands instead of a 500 that looks like a bug.
+/// </summary>
+public sealed class DatabaseHealthCheck(MessengerDbContext db) : IHealthCheck
+{
+    public async Task<HealthCheckResult> CheckHealthAsync(
+        HealthCheckContext context, CancellationToken ct = default)
+    {
+        try
+        {
+            return await db.Database.CanConnectAsync(ct)
+                ? HealthCheckResult.Healthy("Database reachable.")
+                : HealthCheckResult.Unhealthy($"{ErrorCode.DatabaseUnreachable}: database is not reachable.");
+        }
+        catch (Exception ex)
+        {
+            return HealthCheckResult.Unhealthy($"{ErrorCode.DatabaseUnreachable}: {ex.Message}");
+        }
+    }
+}
 
 /// <summary>Exposed so the integration-test host can reference this assembly.</summary>
 public partial class Program;
