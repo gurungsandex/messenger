@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: Build and test (server-side)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: messenger
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release -warnaserror
+
+      # The integration suite is skipped when this is unset, so setting it is what makes
+      # the PostgreSQL-specific query translations actually get exercised. Without it the
+      # run is still green but proves considerably less.
+      - name: Test
+        env:
+          MESSENGER_TEST_CONNECTION: 'Host=localhost;Port=5432;Database=messenger;Username=postgres;Password=postgres'
+        run: dotnet test --no-build --configuration Release --verbosity normal
+
+      - name: Verify migrations apply to a clean database
+        env:
+          MESSENGER_CONNECTION: 'Host=localhost;Port=5432;Database=migration_check;Username=postgres;Password=postgres'
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -c 'CREATE DATABASE migration_check;'
+          dotnet tool install --global dotnet-ef --version 8.0.10
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          dotnet ef database update \
+            --project src/Messenger.Data \
+            --startup-project src/Messenger.Server
+
+      - name: Check for model changes not captured in a migration
+        env:
+          MESSENGER_CONNECTION: 'Host=localhost;Port=5432;Database=migration_check;Username=postgres;Password=postgres'
+        run: |
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          dotnet ef migrations has-pending-model-changes \
+            --project src/Messenger.Data \
+            --startup-project src/Messenger.Server
+
+  # WPF targets net8.0-windows and cannot compile on a Linux agent. This job is a
+  # placeholder that activates with the Phase 5 client work; it exists now so the
+  # requirement is visible in CI rather than discovered late.
+  windows-clients:
+    name: Build Windows clients
+    runs-on: windows-latest
+    if: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - run: dotnet build src/Messenger.Client.Wpf src/Messenger.Admin.Wpf --configuration Release

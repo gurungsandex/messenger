@@ -40,3 +40,6 @@ secrets.json
 # OS
 Thumbs.db
 .DS_Store
+
+# Local dev database
+pgdata/
