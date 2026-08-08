@@ -292,6 +292,60 @@ public sealed class PostgresIntegrationTests : IAsyncLifetime
             history.Select(m => m.Body).Order());
     }
 
+    /// <summary>
+    /// Two administrators racing to create a group with the same name both pass the upfront
+    /// uniqueness check before either has committed; the unique index on (name, deleted_at IS
+    /// NULL) resolves the race, but only one caller used to see it as an opaque 500 rather
+    /// than the same conflict the upfront check reports.
+    ///
+    /// This needs the real database for the same reason the sequence-number race does: SQLite
+    /// runs the unit suite over one shared connection, which serialises writers.
+    /// </summary>
+    [SkippableFact]
+    public async Task Concurrent_group_creation_with_the_same_name_gives_a_clean_conflict_to_the_loser()
+    {
+        Skip.If(ConnectionString is null, "MESSENGER_TEST_CONNECTION is not set.");
+
+        var actor = AddUser("admin_" + Guid.NewGuid().ToString("N")[..8]);
+        var groupName = "racing-group-" + Guid.NewGuid().ToString("N")[..8];
+        var scoped = new NpgsqlConnectionStringBuilder(ConnectionString!) { Database = _schema }.ConnectionString;
+
+        var contexts = Enumerable.Range(0, 2)
+            .Select(_ => new MessengerDbContext(
+                new DbContextOptionsBuilder<MessengerDbContext>().UseNpgsql(scoped).Options))
+            .ToList();
+
+        try
+        {
+            var barrier = new TaskCompletionSource();
+            var creates = contexts.Select(context => Task.Run(async () =>
+            {
+                var service = new GroupService(context, new AuditService(context, new InMemoryAuditSigningKeyProvider()));
+                await barrier.Task;
+                return await service.CreateAsync(groupName, null, actor.Id);
+            })).ToList();
+
+            barrier.SetResult();
+
+            var results = await Task.WhenAll(creates.Select(async t =>
+            {
+                try { return (Ok: true, Group: await t, Code: (string?)null); }
+                catch (MessengerException ex) { return (Ok: false, Group: (Group?)null, Code: ex.Code); }
+            }));
+
+            Assert.Single(results, r => r.Ok);
+            var loser = results.Single(r => !r.Ok);
+            Assert.Equal(ErrorCode.GroupAlreadyExists, loser.Code);
+        }
+        finally
+        {
+            foreach (var context in contexts) await context.DisposeAsync();
+        }
+
+        _db.ChangeTracker.Clear();
+        Assert.Equal(1, await _db.Groups.CountAsync(g => g.Name == groupName && g.DeletedAt == null));
+    }
+
     /// <summary>Confirms the SQLite tick-converter is genuinely not applied on Npgsql.</summary>
     [SkippableFact]
     public async Task Timestamps_are_stored_as_timestamptz_not_ticks()

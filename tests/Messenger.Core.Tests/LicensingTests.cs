@@ -227,6 +227,26 @@ public class LicenseEnforcementTests
         Assert.Equal(0, await h.Db.Licenses.CountAsync());
     }
 
+    /// <summary>
+    /// The install audit entry embeds the licence id in its detail field. Hand-built
+    /// interpolation left a hostile licence id — attacker-authorable by anyone who can issue a
+    /// validly signed licence, not just the vendor's own tooling — able to produce a detail
+    /// field no parser accepts, and because it is hashed into the chain the entry is permanent.
+    /// </summary>
+    [Fact]
+    public async Task A_hostile_licence_id_is_audited_as_valid_json()
+    {
+        using var h = new TestHarness();
+        var payload = Payload(h.Time.GetUtcNow());
+        payload.LicenseId = "LIC-\"; DROP--\n0001";
+
+        await h.License.InstallAsync(LicenseDocument.Issue(payload, h.VendorPrivateKey).ToFileFormat(), Guid.Empty);
+
+        var entry = await h.Db.AuditLog.SingleAsync(e => e.Action == "license.install");
+        using var parsed = System.Text.Json.JsonDocument.Parse(entry.DetailJson!);
+        Assert.Equal(payload.LicenseId, parsed.RootElement.GetProperty("license_id").GetString());
+    }
+
     [Fact]
     public async Task Installing_a_new_licence_supersedes_the_previous_one()
     {

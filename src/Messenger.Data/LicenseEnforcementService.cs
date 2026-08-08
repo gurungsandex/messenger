@@ -74,7 +74,8 @@ public sealed class LicenseEnforcementService(
 
         await db.SaveChangesAsync(ct);
         await audit.AppendAsync("license.install", "success", actorId, "admin", null, null, null,
-            $"{{\"license_id\":\"{status.Payload.LicenseId}\",\"state\":\"{status.State}\"}}", ct);
+            $"{{\"license_id\":{System.Text.Json.JsonSerializer.Serialize(status.Payload.LicenseId)},"
+            + $"\"state\":{System.Text.Json.JsonSerializer.Serialize(status.State.ToString())}}}", ct);
 
         return status;
     }

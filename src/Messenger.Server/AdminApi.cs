@@ -80,7 +80,18 @@ public static class AdminApi
                 MustChangePassword = true,
             };
             db.Users.Add(user);
-            await db.SaveChangesAsync(ct);
+
+            try
+            {
+                await db.SaveChangesAsync(ct);
+            }
+            catch (DbUpdateException)
+            {
+                // Lost the race against a concurrent create of the same username; the unique
+                // index did its job. Report it as the same conflict the upfront check
+                // reports, rather than an opaque 500.
+                return Problem(ErrorCode.UserAlreadyExists, "A user with that name already exists.");
+            }
 
             await auth.SetPasswordAsync(user, request.InitialPassword, sessions, ct);
             user.MustChangePassword = true;

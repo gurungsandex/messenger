@@ -436,6 +436,40 @@ public sealed class AdminApiTests : IAsyncLifetime
         Assert.NotEqual(HttpStatusCode.Created, response.StatusCode);
     }
 
+    /// <summary>
+    /// Two administrators racing to create the same username both pass the upfront
+    /// uniqueness check before either has committed; the unique index resolves the race, but
+    /// only one caller may see it as an opaque 500 rather than the same conflict the upfront
+    /// check reports.
+    /// </summary>
+    [SkippableFact]
+    public async Task Concurrent_creation_of_the_same_username_gives_a_clean_conflict_to_the_loser()
+    {
+        Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
+        await InstallLicenseAsync();
+        await SeedUserAsync("alice", "correct horse battery staple", BuiltInRoles.ServerAdmin);
+        var token = await LoginAsync("alice", "correct horse battery staple");
+
+        Func<Task<HttpResponseMessage>> attempt = () =>
+        {
+            var request = Authed(HttpMethod.Post, "/api/admin/users", token);
+            request.Content = JsonContent.Create(
+                new CreateUserRequest("carol", "Carol", null, "a strong initial password"));
+            return _client.SendAsync(request);
+        };
+
+        var responses = await Task.WhenAll(attempt(), attempt());
+
+        Assert.Single(responses, r => r.StatusCode == HttpStatusCode.Created);
+        var loser = responses.Single(r => r.StatusCode != HttpStatusCode.Created);
+        var body = await loser.Content.ReadFromJsonAsync<ErrorDto>();
+        Assert.Equal(ErrorCode.UserAlreadyExists, body!.Code);
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MessengerDbContext>();
+        Assert.Equal(1, await db.Users.CountAsync(u => u.Username == "carol"));
+    }
+
     [SkippableFact]
     public async Task A_rejected_password_leaves_no_account_behind()
     {

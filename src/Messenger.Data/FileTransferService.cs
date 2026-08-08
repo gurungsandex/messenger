@@ -86,6 +86,9 @@ public sealed class FileTransferService(
         if (sha256Plaintext is not { Length: 32 })
             throw new MessengerException(ErrorCode.MalformedRequest, "A SHA-256 of the file contents is required.");
 
+        if (chunkSize <= 0)
+            throw new MessengerException(ErrorCode.MalformedRequest, "Chunk size must be positive.");
+
         var used = await db.StoredFiles
             .Where(f => f.UploaderId == uploaderId && f.DeletedAt == null)
             .SumAsync(f => f.SizeBytes, ct);

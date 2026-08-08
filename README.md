@@ -35,6 +35,7 @@ compliance archiving possible. It is documented as an accepted risk in the
 | [Threat model](docs/threat-model.md) | Assets, attacker profiles, STRIDE per boundary, mitigations, accepted risks. |
 | [Security review](docs/security-review.md) | Findings from the pre-merge review, fixes, and what remains. |
 | [Production review](docs/production-review.md) | Concurrency, memory, and deployment findings from the follow-up pass. |
+| [Third review](docs/third-review.md) | A third pass repeating the security and production reviews' own bug classes at call sites they missed. |
 | [Error codes](docs/error-codes.md) | Numbered catalog — AUTH/NET/LIC/AD/FILE/SRV — with cause and remediation. |
 | [Deployment guide](docs/deployment.md) | Prerequisites, ports, AD service account, certificates, backup/restore, upgrades, and current status. |
 | [Admin quick reference](docs/quick-reference-admin.md) | One page for daily operations and incidents. |

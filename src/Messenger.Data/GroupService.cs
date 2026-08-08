@@ -55,7 +55,18 @@ public sealed class GroupService(
         }
 
         db.Groups.Add(group);
-        await db.SaveChangesAsync(ct);
+
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException)
+        {
+            // Lost the race against a concurrent create of the same name; the unique index
+            // on (name, deleted_at IS NULL) did its job. Report it as the same conflict the
+            // upfront check reports, rather than an opaque 500.
+            throw new MessengerException(ErrorCode.GroupAlreadyExists, $"A group named '{name}' already exists.");
+        }
 
         await audit.AppendAsync("group.create", "success", actorId, "admin", null,
             "group", group.Id, $"{{\"name\":{System.Text.Json.JsonSerializer.Serialize(name)}}}", ct);

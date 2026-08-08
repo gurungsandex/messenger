@@ -125,6 +125,21 @@ public class FileUploadTests : FileTestBase
         Assert.Equal(ErrorCode.QuotaExceeded, ex.Code);
     }
 
+    /// <summary>
+    /// <c>ChunkCount</c> is computed as <c>(sizeBytes + chunkSize - 1) / chunkSize</c> with a
+    /// caller-supplied chunk size. An unvalidated zero divides by zero before a single byte
+    /// moves; a negative value would produce a nonsensical chunk count.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task Rejects_a_non_positive_chunk_size(int chunkSize)
+    {
+        var ex = await Assert.ThrowsAsync<MessengerException>(() => H.Files.BeginUploadAsync(
+            Alice.Id, ConversationId, "report.pdf", 100, SHA256.HashData([1]), chunkSize: chunkSize));
+        Assert.Equal(ErrorCode.MalformedRequest, ex.Code);
+    }
+
     [Fact]
     public async Task Rejects_an_upload_from_a_non_participant()
     {
