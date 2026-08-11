@@ -119,6 +119,48 @@ exclude a previous boot is a race that a slower or faster runner will lose. A re
 container's log starts empty, so a creation warning in it unambiguously belongs to this boot
 and no time window is needed.
 
+### FR-4 · HIGH · A new deployment cannot reach its own first login
+
+**Location:** `src/Messenger.Server/Program.cs`, `src/Messenger.Server/AdminApi.cs`,
+`src/Messenger.Data/LicenseEnforcementService.cs`
+
+Found by following the deployment guide from an empty database rather than reading it. A
+freshly migrated install has five seeded roles and **zero users**, and `AuthoriseLoginAsync`
+refuses every login while no licence is installed. Both remedies are behind the authenticated
+admin API:
+
+- `POST /api/admin/users` requires a session carrying `users.create`.
+- `POST /api/admin/license` requires a session carrying `license.install`.
+
+There is no seeded administrator, no first-run token, and no CLI verb — `Program.cs` reads no
+arguments at all. So the deployment cannot produce its first session, and nothing about the
+failure says so: the server starts, reports `/health/ready` healthy, and returns the same
+generic `AUTH-101` to every credential, which is the correct response for an unauthenticated
+caller and useless to the operator who just installed it.
+
+The prior three reviews could not have found this. They exercised the server through a test
+harness that seeds its own users directly, which is precisely the step a real operator has no
+way to perform.
+
+**Fix.** `tools/Messenger.Bootstrap` writes the first administrator and an evaluation licence
+straight to the database — the only thing that can break the cycle without a session. It
+refuses to run before the roles are seeded, since an administrator with no role can sign in
+and do nothing, and it applies the server's own password policy so a rejected password fails
+loudly instead of creating an account that can never authenticate.
+
+It is a provisioning tool, not a fix for the underlying gap: **first-run provisioning is
+still missing from the product.** The proper form is a first-run token or an
+`admin create` verb on the server itself, which is server work with its own authorization
+design. Recorded here so it is not mistaken for finished.
+
+**Related, and worse in practice:** accounts created through `POST /api/admin/users` are
+written with `MustChangePassword = true`, `AuthenticateAsync` refuses a login that carries it
+(`AUTH-106`), and **no password-change endpoint exists** — `/api/auth/password` is a 404. So
+every account created through the supported API is unusable, and the only accounts that can
+log in are the ones the bootstrap tool writes. Left as-is here because the fix is a new
+authenticated endpoint with its own session-revocation semantics, not a review repair;
+`AuthService.SetPasswordAsync` already implements the logic it would call.
+
 ### FR-3 · LOW · The audit signing escrow defaulted into the test binary's directory
 
 **Location:** `tests/Messenger.Server.Tests/AdminApiTests.cs`
@@ -137,6 +179,9 @@ a test that passes or fails depending on what a previous run left on disk.
 
 | Item | Why |
 | --- | --- |
+| First-run provisioning in the server itself | FR-4 is unblocked by a tool, not closed. A first-run token or an `admin create` verb on the server is the real fix, and it needs an authorization design of its own — a bootstrap path that mints a privileged account is exactly the surface that must not be got wrong. |
+| No password-change endpoint, so API-created accounts cannot log in | See FR-4. `AuthService.SetPasswordAsync` already does the work, including revoking every existing session; what is missing is an authenticated route to it and a decision about whether a must-change login gets a restricted session or a single-use token. That is feature design, not a review repair. |
+| File transfer is complete and tested but reachable from no route | Carried from the third review, and worth restating now that the deployment path exists: an evaluator following the guide finds a documented, tested feature that cannot be invoked. Wiring it needs its own authorization surface for upload, download, and delete. |
 | Licence seat and concurrent-session limits can be exceeded by simultaneous requests | Unchanged from the third review, and still correctly deferred. `EnsureSeatAvailableAsync` and the total-session check count-then-write with no locking and no backing constraint. A correct fix serialises the count and the write across a multi-service flow spanning several `SaveChangesAsync` calls — a transactional restructuring, not a repair of the check. Exposure is licence over-use, self-correcting on the next check and gated behind an admin action or the login rate limiter. Not a security boundary. |
 | Session token accepted in the `access_token` query string by the hub | `ChatHub` falls back to a query parameter because the WebSocket handshake cannot always carry headers. Query strings are logged by reverse proxies and access logs, so this writes live session tokens into files with different retention and access rules than the session store. Not changed here because removing the fallback without a client to test against risks breaking the transport outright; the mitigation is that tokens are opaque, device-bound, and instantly revocable. Flagged for the client work, which is where it can be verified. |
 | `FileTransferService` is complete and tested but reachable from no route | Unchanged from the third review. The service is fully covered, but nothing wires it to HTTP or the hub, so file transfer is not usable in a deployment despite being listed as built. Wiring it is feature work with its own authorization surface, not a review fix. |
