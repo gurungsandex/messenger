@@ -37,6 +37,16 @@ appsettings.Local.json
 *.pem
 secrets.json
 
+# Deployment secrets. The .example files beside them are the ones that are tracked.
+.env
+deploy/messenger.env
+
+# Key material and encrypted content. A committed escrow blob is an offline attack on the
+# passphrase, and it is the root of every key in the deployment.
+*.escrow
+keystore/
+filestore/
+
 # OS
 Thumbs.db
 .DS_Store

@@ -67,6 +67,12 @@ public sealed class AdminApiTests : IAsyncLifetime
             b.UseSetting("Licensing:VendorPublicKey", Convert.ToBase64String(vendorPublic));
             b.UseSetting("KeyStore:Passphrase", "test-keystore-passphrase");
             b.UseSetting("KeyStore:EscrowPath", Path.Combine(_keyStoreDirectory, "root.escrow"));
+
+            // Scoped to this test's directory like the KEK escrow. Left unset it defaults
+            // under the test binary's own directory, where it outlives the run and is shared
+            // by every other test class — so a checkpoint written by one run would be
+            // verified against a key ring left behind by another.
+            b.UseSetting("AuditSigningKey:EscrowPath", Path.Combine(_keyStoreDirectory, "audit-signing.escrow"));
         });
 
         _client = _factory.CreateClient();
@@ -623,6 +629,39 @@ public sealed class AdminApiTests : IAsyncLifetime
 
         Assert.Contains("\"valid\":false", body);
         Assert.Contains(ErrorCode.AuditChainVerificationFailed, body);
+    }
+
+    /// <summary>
+    /// The checkpoint half of verification is reported, not just the hash chain.
+    ///
+    /// Before the signing key was made durable there was nothing worth reporting: the key was
+    /// minted per process, so any checkpoint written by an earlier run was signed by a key
+    /// this one had never held and could never be checked. Anything unverifiable here is a
+    /// regression in that durability.
+    /// </summary>
+    [SkippableFact]
+    public async Task Audit_verification_reports_the_checkpoint_signatures()
+    {
+        Skip.If(BaseConnection is null, "MESSENGER_TEST_CONNECTION is not set.");
+        await InstallLicenseAsync();
+        await SeedUserAsync("alice", "correct horse battery staple", BuiltInRoles.ServerAdmin);
+        var token = await LoginAsync("alice", "correct horse battery staple");
+
+        // Startup does not write 1000 audit entries, so a checkpoint is forced rather than
+        // waited for -- the interval is not what is under test here.
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<MessengerDbContext>();
+            var audit = scope.ServiceProvider.GetRequiredService<AuditService>();
+            await audit.WriteCheckpointAsync(await db.AuditLog.OrderByDescending(e => e.Id).FirstAsync());
+        }
+
+        var response = await _client.SendAsync(Authed(HttpMethod.Post, "/api/admin/audit/verify", token));
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Contains("\"valid\":true", body);
+        Assert.Contains("\"checkpointsVerified\":1", body);
+        Assert.Contains("\"checkpointsUnverifiable\":0", body);
     }
 
     // ---- Authorization: the defect these tests exist to prevent regressing ----

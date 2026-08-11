@@ -1,0 +1,31 @@
+# Keeping the build context small is secondary here. The first purpose is making sure no
+# local secret or key material is ever copied into an image layer, where it would survive
+# every later deletion.
+**/bin/
+**/obj/
+**/TestResults/
+artifacts/
+publish/
+
+.git/
+.github/
+.vs/
+.idea/
+
+tests/
+docs/
+deploy/
+*.md
+
+# Secrets and key material — never in an image.
+**/appsettings.Development.json
+**/appsettings.Local.json
+**/secrets.json
+**/*.pfx
+**/*.snk
+**/*.key
+**/*.pem
+**/*.escrow
+keystore/
+filestore/
+pgdata/

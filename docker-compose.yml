@@ -1,0 +1,71 @@
+# A complete single-host deployment: the server, its database, and the two volumes that hold
+# the state neither can be rebuilt without.
+#
+# Secrets come from the environment, never from this file. Copy deploy/.env.example to .env
+# and fill it in; .env is gitignored.
+#
+# TLS terminates at a reverse proxy in front of this stack. The server speaks plain HTTP on
+# an internal network here — see docs/deployment.md section 4 for why, and for the
+# ForwardedHeaders settings the proxy requires.
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-messenger}
+      POSTGRES_USER: ${POSTGRES_USER:-messenger}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Not published to the host. The database is reachable only from the internal network,
+    # so a misconfigured host firewall cannot expose it.
+    expose:
+      - '5432'
+    networks: [internal]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-messenger} -d ${POSTGRES_DB:-messenger}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+
+      ConnectionStrings__Messenger: >-
+        Host=postgres;Port=5432;Database=${POSTGRES_DB:-messenger};Username=${POSTGRES_USER:-messenger};Password=${POSTGRES_PASSWORD}
+
+      # Protects the root KEK and the audit signing key. Losing it makes every message and
+      # file in the deployment permanently unreadable — it is not a rotatable credential.
+      KeyStore__Passphrase: ${KEYSTORE_PASSPHRASE:?KEYSTORE_PASSPHRASE is required}
+
+      Licensing__VendorPublicKey: ${VENDOR_PUBLIC_KEY:?VENDOR_PUBLIC_KEY is required}
+
+      # The server sits behind a proxy in this topology, so it must be told which hop to
+      # trust. Without this every audit entry records the proxy's address and the per-IP
+      # login rate limiter collapses into one bucket shared by the whole organisation.
+      ForwardedHeaders__Enabled: 'true'
+      ForwardedHeaders__KnownNetworks__0: ${TRUSTED_PROXY_NETWORK:-172.16.0.0/12}
+    volumes:
+      - keystore:/var/lib/messenger/keystore
+      - filestore:/var/lib/messenger/filestore
+    ports:
+      - '${SERVER_BIND:-127.0.0.1}:8443:8080'
+    networks: [internal]
+
+volumes:
+  pgdata:
+  # Back these two up together with the database. A database backup without the key store
+  # restores to unreadable ciphertext, and without the audit signing key the restored audit
+  # chain can no longer prove its own origin.
+  keystore:
+  filestore:
+
+networks:
+  internal:

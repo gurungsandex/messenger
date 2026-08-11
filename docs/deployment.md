@@ -155,6 +155,29 @@ The escrow blob is the KEK wrapped under an administrator passphrase (PBKDF2-HMA
 600 000 iterations, then AES-256-GCM). Treat the passphrase as you would a domain admin
 credential — split it across two custodians if your policy calls for that.
 
+> The `keystore export-escrow` subcommands above are **not implemented**. What is implemented
+> is the file-backed store the server uses today: on first start it creates the escrow blob at
+> `KeyStore:EscrowPath` and logs a warning naming the file. That file *is* the escrow blob —
+> copy it, with its passphrase, to wherever the organisation keeps recovery secrets.
+
+### 6.1 The audit signing key
+
+There are **two** key files, not one. Alongside the KEK escrow the server keeps its audit
+checkpoint signing key at `AuditSigningKey:EscrowPath`, sealed under the same passphrase.
+
+Both are created on first start and both are logged as a warning when they are. Back them up
+together — they are protected by the same passphrase, so there is no case where you have one
+and not the other.
+
+Losing the KEK makes message and file history unreadable. Losing the audit signing key is
+less severe but not harmless: the audit chain keeps its internal hash consistency, but every
+checkpoint written under the lost key becomes unverifiable, and the log can no longer prove it
+is the one this server wrote. `POST /api/admin/audit/verify` reports those as
+`checkpointsUnverifiable`.
+
+A signing key is only ever **added** to the ring on rotation, never replaced, so checkpoints
+signed under an earlier key keep verifying.
+
 ---
 
 ## 7. Licence installation
@@ -188,6 +211,9 @@ from 30 days out. After grace, all logins are refused (`LIC-110`).
     "EscrowPath": "D:\\MessengerKeys\\root.escrow",   // REQUIRED — back this file up
     "Passphrase": "<from environment, never this file>"  // REQUIRED — server refuses to start without it
   },
+  "AuditSigningKey": {
+    "EscrowPath": "D:\\MessengerKeys\\audit-signing.escrow"  // back up with the KEK escrow
+  },
   "FileStore": { "RootPath": "D:\\MessengerFiles" },
   "Kestrel": { "Endpoints": { "Https": { "Url": "https://0.0.0.0:8443" } } }
 }
@@ -207,6 +233,55 @@ bits and a new file inherits the directory's ACL, so **restrict the key store di
 itself** — the service account and administrators only. The passphrase is what actually
 protects the blob, but a file holding the root key of every message and file in the
 deployment should not be one that any local account can copy and attack offline at leisure.
+
+### 8.1 Running the server
+
+The Windows Service host and MSI are not built (section 12). Two supported ways to run the
+server exist today, both exercised in CI on every change.
+
+#### Container
+
+```bash
+cp deploy/.env.example .env    # fill in; .env is gitignored
+docker compose up -d --build
+```
+
+The compose file publishes to loopback only and keeps PostgreSQL on an internal network, so
+the server is reachable through your reverse proxy and the database from nowhere else. The
+key store and file store are named volumes: **back them up with the database** — a container
+recreated without them starts clean and cannot read a single existing message.
+
+Migrations do not run from the image. Apply them explicitly, as below.
+
+#### systemd
+
+```bash
+install -d -m 0755 /opt/messenger
+dotnet publish src/Messenger.Server -c Release -o /opt/messenger
+
+install -d -m 0700 /etc/messenger
+install -m 0600 deploy/messenger.env.example /etc/messenger/messenger.env
+$EDITOR /etc/messenger/messenger.env          # fill in every CHANGE_ME
+
+useradd --system --home-dir /var/lib/messenger messenger
+install -m 0644 deploy/messenger-server.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now messenger-server
+```
+
+The unit runs unprivileged under `ProtectSystem=strict` with `/var/lib/messenger` as its only
+writable path.
+
+#### Migrations
+
+Never automatic, on either path — an unattended restart must not reshape a production
+database (`SRV-104`):
+
+```bash
+export MESSENGER_CONNECTION='Host=...;Database=messenger;Username=...;Password=...'
+dotnet ef database update --project src/Messenger.Data --startup-project src/Messenger.Server
+```
+
+Apply them **before** starting the new binary on an upgrade. See section 10.
 
 ### Roles
 
@@ -243,6 +318,7 @@ Four things must be backed up. **Three of the four are useless without the fourt
 | Database | `pg_dump` or PITR with WAL archiving | Daily full, continuous WAL |
 | File store | Filesystem or snapshot backup | Daily |
 | **KEK escrow blob** | Copied once, stored offline | On creation and each rotation |
+| **Audit signing key ring** | Copied with the KEK escrow — same directory, same passphrase | On creation and each rotation |
 | Configuration | With change control | On change |
 
 ### Restore
@@ -250,11 +326,17 @@ Four things must be backed up. **Three of the four are useless without the fourt
 1. Restore PostgreSQL.
 2. Restore the file store.
 3. **Restore or re-import the KEK.** Without it the first two are ciphertext.
-4. Start the service and verify the audit chain:
+4. **Restore the audit signing key ring.** Without it the restored audit log still verifies
+   its hash chain but can no longer prove its origin.
+5. Start the service and verify the audit chain:
 
-```powershell
-Messenger.Server.exe audit verify
+```bash
+curl -fsS -X POST https://messenger.corp.local:8443/api/admin/audit/verify \
+  -H "X-Session-Token: $TOKEN" -H "X-Device-Fingerprint: $DEVICE"
 ```
+
+A healthy response has `"valid": true` and `"checkpointsUnverifiable": 0`. A non-zero
+`checkpointsUnverifiable` after a restore means step 4 was missed.
 
 Recommended targets: **RPO ≤ 15 minutes** with WAL archiving, **RTO ≤ 2 hours**.
 
@@ -355,15 +437,19 @@ Stated plainly so you can plan. Nothing below is a stub presented as finished.
 | **Kerberos / NTLM SSO** | **Not implemented.** Local Argon2id authentication works. |
 | **DPAPI-NG / TPM / PKCS#11 key stores** | **Not implemented.** The provider abstraction and escrow are complete; the shipped provider holds the KEK in process memory and is a development provider, not a production one. |
 | **WPF client and admin console** | **Not implemented.** All admin logic exists behind the tested REST API. WPF targets `net8.0-windows` and needs a Windows build agent. |
-| **Windows Service host** | **Not implemented.** Runs as a console/Kestrel application today. |
+| **Windows Service host** | **Not implemented.** On Linux the server runs as a managed service under the systemd unit in `deploy/`, or as a container — see section 8.1. On Windows it runs as a console application. |
 | **MSI installers and code signing** | **Not implemented.** Signing additionally requires an OV or EV certificate on an HSM or token, which must be supplied in the release pipeline. |
 | **Owner tier: activation, telemetry, support chat** | **Not implemented.** Offline licence validation is complete and is the only part required for operation. |
 
 ### What this means in practice
 
 The server is functional for **non-domain deployments using local accounts**, driven through
-the REST API and SignalR hub. It is **not yet deployable as a turnkey Windows product**:
-there is no installer, no service host, no GUI, and no working AD binding.
+the REST API and SignalR hub, and it can now be **deployed and operated as a service** — as a
+container or under systemd, with health checks, durable keys, and a documented backup and
+restore procedure (sections 8.1 and 9).
+
+It is still **not a turnkey Windows product**: there is no installer, no Windows service
+host, no GUI, and no working AD binding.
 
 The remaining work is integration against Windows-specific APIs and packaging, not
 architecture. The security-critical core — cryptography, authentication, authorization,

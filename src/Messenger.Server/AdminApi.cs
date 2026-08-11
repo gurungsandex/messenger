@@ -281,14 +281,25 @@ public static class AdminApi
                 .ToListAsync(ct));
         }), Permissions.AuditRead);
 
+        // Both halves are reported. The hash chain proves the entries are internally
+        // consistent; the checkpoint signatures prove the chain is the one this server
+        // actually wrote. A rewritten chain with recomputed hashes passes the first and fails
+        // the second, so reporting only the first would call a forged log valid.
         Require(admin.MapPost("/audit/verify", async (AuditService audit, CancellationToken ct) =>
         {
             var result = await audit.VerifyAsync(ct: ct);
+            var checkpoints = await audit.VerifyCheckpointsAsync(ct);
+            var valid = result.IsValid && checkpoints.IsValid;
+
             return Results.Ok(new
             {
-                valid = result.IsValid,
+                valid,
                 firstInvalidEntryId = result.FirstInvalidEntryId,
-                code = result.IsValid ? null : ErrorCode.AuditChainVerificationFailed,
+                checkpointsVerified = checkpoints.Verified,
+                checkpointsUnverifiable = checkpoints.Unverifiable,
+                firstInvalidCheckpointId = checkpoints.FirstInvalidCheckpointId,
+                checkpointDetail = checkpoints.Detail,
+                code = valid ? null : ErrorCode.AuditChainVerificationFailed,
             });
         }), Permissions.AuditVerify);
 

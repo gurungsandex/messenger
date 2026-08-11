@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using Messenger.Contracts;
 using Messenger.Core;
 using Messenger.Crypto;
@@ -122,6 +123,65 @@ public sealed class AuditService(MessengerDbContext db, IAuditSigningKeyProvider
         }
     }
 
+    /// <summary>
+    /// Verifies every stored checkpoint signature against the chain head it claims to cover.
+    ///
+    /// Without this the checkpoints were write-only: they were signed on append and nothing
+    /// ever checked one, so a rewritten chain that recomputed its own hashes — the exact
+    /// attack the signatures exist to catch — verified clean. The hash chain alone proves
+    /// only internal consistency; the signature is what a party holding the public key can
+    /// use to prove the chain is the one the server actually wrote.
+    ///
+    /// A checkpoint whose signing key this server does not hold is reported as unverifiable
+    /// rather than invalid. Those are different facts to an auditor: one means the evidence
+    /// is missing, the other means it is contradicted.
+    /// </summary>
+    public async Task<AuditCheckpointVerification> VerifyCheckpointsAsync(CancellationToken ct = default)
+    {
+        var checkpoints = await db.AuditCheckpoints.OrderBy(c => c.UpToAuditId).ToListAsync(ct);
+        if (checkpoints.Count == 0) return new AuditCheckpointVerification(0, 0, null, null);
+
+        var verified = 0;
+        var unverifiable = 0;
+
+        foreach (var checkpoint in checkpoints)
+        {
+            byte[] publicKey;
+            try
+            {
+                publicKey = signingKeys.GetPublicKey(checkpoint.SigningKeyId);
+            }
+            catch (MessengerException)
+            {
+                unverifiable++;
+                continue;
+            }
+
+            // The stored head hash is checked against the entry it names before the signature
+            // is checked. A signature that is valid over a head hash which no longer matches
+            // the entry at that id is the interesting case: the chain was rewritten under a
+            // genuine old signature.
+            var storedHead = await db.AuditLog
+                .Where(e => e.Id == checkpoint.UpToAuditId)
+                .Select(e => e.EntryHash)
+                .FirstOrDefaultAsync(ct);
+
+            if (storedHead is null
+                || !CryptographicOperations.FixedTimeEquals(storedHead, checkpoint.HeadHash)
+                || !AuditChain.VerifyCheckpoint(
+                        checkpoint.HeadHash, checkpoint.UpToAuditId, checkpoint.Signature, publicKey))
+            {
+                return new AuditCheckpointVerification(
+                    verified, unverifiable, checkpoint.UpToAuditId,
+                    $"Checkpoint at entry {checkpoint.UpToAuditId} does not match the chain.");
+            }
+
+            verified++;
+        }
+
+        return new AuditCheckpointVerification(verified, unverifiable, null, null);
+    }
+
     /// <summary>Recomputes the chain over a range and reports the first entry that fails.</summary>
     public async Task<AuditVerificationResult> VerifyAsync(long fromId = 1, long? toId = null, CancellationToken ct = default)
     {
@@ -142,6 +202,23 @@ public sealed class AuditService(MessengerDbContext db, IAuditSigningKeyProvider
     }
 }
 
+/// <summary>
+/// Outcome of checking the stored checkpoint signatures.
+///
+/// <paramref name="Unverifiable"/> counts checkpoints signed by a key this server does not
+/// hold. That is not a failure — it is the expected state after restoring a database without
+/// its signing key ring — but it is reported rather than ignored, because a chain whose
+/// checkpoints cannot be checked offers no more assurance than one with none.
+/// </summary>
+public sealed record AuditCheckpointVerification(
+    int Verified,
+    int Unverifiable,
+    long? FirstInvalidCheckpointId,
+    string? Detail)
+{
+    public bool IsValid => FirstInvalidCheckpointId is null;
+}
+
 public interface IAuditSigningKeyProvider
 {
     (string KeyId, byte[] PrivateKey) GetSigningKey();
@@ -149,8 +226,13 @@ public interface IAuditSigningKeyProvider
 }
 
 /// <summary>
-/// In-memory signing key for development and tests. Production keeps this in a TPM or HSM
-/// so the key can be used but not extracted — see AR-6 in the threat model.
+/// In-memory signing key for development and tests only.
+///
+/// <b>Not usable in production:</b> the pair is generated in the constructor, so every
+/// process start produces a new key id and discards the previous public key. Checkpoints
+/// signed before a restart become permanently unverifiable. Production uses
+/// <see cref="FileBackedAuditSigningKeyProvider"/>, or a TPM/HSM-backed provider that keeps
+/// the key usable but not extractable — see AR-6 in the threat model.
 /// </summary>
 public sealed class InMemoryAuditSigningKeyProvider : IAuditSigningKeyProvider
 {
