@@ -1,0 +1,73 @@
+# systemd unit for a non-container Linux deployment.
+#
+# Install to /etc/systemd/system/messenger-server.service, then:
+#   systemctl daemon-reload && systemctl enable --now messenger-server
+#
+# Secrets live in /etc/messenger/messenger.env (root-owned, mode 0600), not in this file —
+# a unit file is world-readable and shows up in `systemctl cat`.
+#
+# The Windows Service host described in docs/deployment.md is still not built. This is the
+# supported way to run the server as a managed service today.
+
+[Unit]
+Description=Messenger Communication Server
+Documentation=file:///opt/messenger/docs/deployment.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=messenger
+Group=messenger
+WorkingDirectory=/opt/messenger
+ExecStart=/usr/bin/dotnet /opt/messenger/Messenger.Server.dll
+
+EnvironmentFile=/etc/messenger/messenger.env
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=DOTNET_gcServer=1
+
+# Restart on failure, but stop trying if it fails repeatedly — a server that cannot reach its
+# key store will not fix itself by restarting, and a tight restart loop buries the one log
+# line that says why.
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=120
+
+# Connections are given time to drain. ACK implies durable, so nothing is lost if they do
+# not — clients reconnect and replay their backlog (SRV-208).
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# --- Hardening ----------------------------------------------------------------------
+# The server needs to write exactly two directories: the key store and the file store.
+# Everything else is read-only to it.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+ReadWritePaths=/var/lib/messenger
+
+# The key store holds the root of every key in the deployment. 0700 on the directory is what
+# protects it on a file system with no ACLs; the passphrase is what protects the blob.
+StateDirectory=messenger
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

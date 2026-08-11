@@ -65,6 +65,128 @@ jobs:
             --project src/Messenger.Data \
             --startup-project src/Messenger.Server
 
+  # The container image is the deployment artefact that actually exists today, so it is
+  # built on every change rather than only at release. A Dockerfile that is not built in CI
+  # is discovered to be broken during an incident.
+  container:
+    name: Build container image
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Needed for `dotnet ef` below. The image builds its own SDK layer, but the migrations
+      # are applied from the runner.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: messenger-server:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Proves the image starts, reaches its database, and reports ready — not merely that
+      # it compiled. The health endpoint is what a load balancer will ask, so it is what CI
+      # asks too.
+      - name: Start PostgreSQL
+        run: |
+          docker run -d --name pg --network host \
+            -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=messenger \
+            postgres:16
+          for i in $(seq 1 30); do
+            docker exec pg pg_isready -U postgres && break
+            sleep 2
+          done
+
+      - name: Apply migrations
+        env:
+          MESSENGER_CONNECTION: 'Host=localhost;Port=5432;Database=messenger;Username=postgres;Password=postgres'
+        run: |
+          dotnet tool install --global dotnet-ef --version 8.0.10
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          dotnet ef database update --project src/Messenger.Data --startup-project src/Messenger.Server
+
+      - name: Smoke-test the image
+        run: |
+          docker volume create messenger-keystore
+
+          docker run -d --name messenger --network host \
+            -e ASPNETCORE_ENVIRONMENT=Development \
+            -e ASPNETCORE_URLS='http://127.0.0.1:8080' \
+            -e ConnectionStrings__Messenger='Host=127.0.0.1;Port=5432;Database=messenger;Username=postgres;Password=postgres' \
+            -e KeyStore__Passphrase='ci-smoke-test-passphrase' \
+            -e Licensing__VendorPublicKey="$(head -c 32 /dev/urandom | base64)" \
+            -v messenger-keystore:/var/lib/messenger/keystore \
+            messenger-server:ci
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health/ready | grep -q Healthy; then
+              echo 'Server reported ready.'
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo 'Server did not become ready.'
+          docker logs messenger
+          exit 1
+
+      # The whole point of the file-backed key store is that the keys outlive the process.
+      # Asserted because the failure is silent: the server starts happily and only the audit
+      # checkpoints written before the restart become unverifiable.
+      #
+      # The container is *replaced* rather than restarted. That is the stronger property and
+      # the one an upgrade actually exercises — a new container on the same volumes — and it
+      # keeps the assertion honest: a fresh container's log starts empty, so a key-creation
+      # warning in it unambiguously belongs to this boot. Grepping a restarted container's
+      # log needs a time window, and any window that has to exclude the previous boot is a
+      # race waiting to be lost on a slower runner.
+      - name: Verify keys survive container replacement
+        run: |
+          docker rm -f messenger
+
+          docker run -d --name messenger --network host \
+            -e ASPNETCORE_ENVIRONMENT=Development \
+            -e ASPNETCORE_URLS='http://127.0.0.1:8080' \
+            -e ConnectionStrings__Messenger='Host=127.0.0.1;Port=5432;Database=messenger;Username=postgres;Password=postgres' \
+            -e KeyStore__Passphrase='ci-smoke-test-passphrase' \
+            -e Licensing__VendorPublicKey="$(head -c 32 /dev/urandom | base64)" \
+            -v messenger-keystore:/var/lib/messenger/keystore \
+            messenger-server:ci
+
+          ready=no
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health/ready | grep -q Healthy; then
+              ready=yes
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$ready" != yes ]; then
+            echo 'Replacement container did not become ready.'
+            docker logs messenger
+            exit 1
+          fi
+
+          # This container mounted an existing key store, so it must have loaded both keys
+          # rather than created them.
+          if docker logs messenger 2>&1 | grep -q 'was created'; then
+            echo 'A key was regenerated against an existing key store — it is not durable.'
+            docker logs messenger 2>&1 | grep 'was created'
+            exit 1
+          fi
+
+          echo 'Both keys loaded from the existing key store.'
+
   # WPF targets net8.0-windows and cannot compile on a Linux agent. This job is a
   # placeholder that activates with the Phase 5 client work; it exists now so the
   # requirement is visible in CI rather than discovered late.

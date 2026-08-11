@@ -4,11 +4,11 @@ A private, self-hosted corporate IM platform for LAN/WAN/enterprise networks. In
 1:1 chat, group chat, file transfer, and presence, with no cloud dependency and no
 third-party message relay. All customer data stays on customer infrastructure.
 
-> **Status: server-side complete, security- and production-reviewed; Windows packaging not
-> started.** 307 tests pass, including end-to-end HTTP tests and a PostgreSQL-backed
-> integration suite. The security-critical core is built and tested; the LDAPS binding, SSO,
-> WPF clients, Windows Service host, and installers are **not implemented**. See
-> [What is and isn't built](#what-is-and-isnt-built).
+> **Status: server-side complete and deployable; Windows packaging not started.** 321 tests
+> pass, including end-to-end HTTP tests and a PostgreSQL-backed integration suite. The server
+> ships with a container image and a systemd unit, both smoke-tested in CI against a real
+> database. The LDAPS binding, SSO, WPF clients, Windows Service host, and MSI installers are
+> **not implemented**. See [What is and isn't built](#what-is-and-isnt-built).
 
 ## Confirmed decisions
 
@@ -36,6 +36,7 @@ compliance archiving possible. It is documented as an accepted risk in the
 | [Security review](docs/security-review.md) | Findings from the pre-merge review, fixes, and what remains. |
 | [Production review](docs/production-review.md) | Concurrency, memory, and deployment findings from the follow-up pass. |
 | [Third review](docs/third-review.md) | A third pass repeating the security and production reviews' own bug classes at call sites they missed. |
+| [Fourth review](docs/fourth-review.md) | A deployment-readiness pass: what breaks when the process is restarted, restored, or run as a service. |
 | [Error codes](docs/error-codes.md) | Numbered catalog — AUTH/NET/LIC/AD/FILE/SRV — with cause and remediation. |
 | [Deployment guide](docs/deployment.md) | Prerequisites, ports, AD service account, certificates, backup/restore, upgrades, and current status. |
 | [Admin quick reference](docs/quick-reference-admin.md) | One page for daily operations and incidents. |
@@ -62,7 +63,9 @@ messenger/
 │   ├── Messenger.Admin.Wpf/       IT admin management console        (not built)
 │   └── Messenger.Owner/           Vendor licensing/telemetry service (not built)
 ├── tests/                         Unit, integration, and end-to-end test projects
-└── deploy/                        WiX installers, service config     (not built)
+├── deploy/                        systemd unit and config examples   (WiX installers not built)
+├── Dockerfile                     Container image for the server
+└── docker-compose.yml             Single-host deployment: server, database, volumes
 ```
 
 ## Build phases
@@ -76,7 +79,7 @@ messenger/
 | 4 | Active Directory integration | **Partial** — sync engine complete and tested; LDAPS binding not written |
 | 5 | Admin console | **Partial** — REST API complete and tested; WPF UI not written |
 | 6 | Licensing + support chat | **Partial** — licensing complete and tested; Owner tier not written |
-| 7 | Installers + documentation | **Partial** — docs complete; installers and service host not written |
+| 7 | Installers + documentation | **Partial** — docs complete; container image and systemd unit shipped; MSI installers and Windows service host not written |
 
 Each phase delivers runnable code with tests. Nothing is marked complete while it is a stub.
 
@@ -93,41 +96,56 @@ Each phase delivers runnable code with tests. Nothing is marked complete while i
 | Group history visibility windows (no retroactive access on join) | Built, tested |
 | Presence with auto-away, scoped to conversation peers | Built, tested |
 | File transfer: chunked, resumable, per-chunk AEAD, manifest, crypto-shred delete | Built, tested |
-| Audit log: SHA-256 chain, Ed25519 checkpoints, fail-closed writes | Built, tested |
+| Audit log: SHA-256 chain, Ed25519 checkpoints (durable signing key, verified on demand), fail-closed writes | Built, tested |
 | Directory sync engine, reconciliation rules, RFC 4515/4514 escaping | Built, tested |
 | Licensing: Ed25519 signing, offline validation, read-only grace, enforcement | Built, tested |
 | Admin REST API + SignalR hub | Built, tested |
 | RBAC: five seeded roles, per-route permissions, cross-tier escalation refused | Built, tested |
 | Durable root key store with escrow; server refuses to start without a passphrase | Built, tested |
+| Container image and systemd unit, both smoke-tested in CI against a real database | Built, tested |
 | TLS 1.3 enforcement, HSTS, security headers, rate limiting | Built, tested |
 | **LDAPS wire binding** | **Not built** — engine is complete behind `IDirectoryProvider`; needs a domain controller |
 | **Kerberos / NTLM SSO** | **Not built** — local Argon2id auth works |
 | **DPAPI-NG / TPM / PKCS#11 key stores** | **Not built** — abstraction and escrow complete; shipped provider is development-only |
 | **WPF client and admin console** | **Not built** — all admin logic sits behind the tested REST API |
-| **Windows Service host, MSI installers, code signing** | **Not built** |
+| **Windows Service host, MSI installers, code signing** | **Not built** — the server runs as a managed service on Linux via `deploy/messenger-server.service` or the container image |
 | **Owner tier** (activation, telemetry, support chat) | **Not built** — offline licence validation is complete and is all that operation requires |
 
 The server is usable today for **non-domain deployments with local accounts**, driven
-through the REST API and SignalR hub. It is **not a turnkey Windows product**: no installer,
-no service host, no GUI, no working AD binding. The remaining work is Windows-specific
-integration and packaging, not architecture.
+through the REST API and SignalR hub, and it can be deployed and operated as a service — see
+[section 8.1 of the deployment guide](docs/deployment.md). It is **not a turnkey Windows
+product**: no MSI, no Windows service host, no GUI, no working AD binding. The remaining work
+is Windows-specific integration and packaging, not architecture.
 
 ## Running it
 
 ```bash
 # Requires .NET 8 SDK and PostgreSQL 16
 dotnet build
-dotnet test                        # 259 tests; database-backed tests skip without a connection
+dotnet test                        # 270 tests; database-backed tests skip without a connection
 
-# Include the PostgreSQL-backed suites (48 more: integration + end-to-end HTTP)
+# Include the PostgreSQL-backed suites (51 more: integration + end-to-end HTTP)
 export MESSENGER_TEST_CONNECTION='Host=localhost;Port=5432;Database=messenger;Username=postgres;Password=postgres'
-dotnet test                        # 307 tests
+dotnet test                        # 321 tests
 
 # Apply the schema. Migrations never run automatically at startup — an unattended
 # restart must not reshape a production database.
 export MESSENGER_CONNECTION='Host=localhost;Port=5432;Database=messenger;Username=messenger;Password=messenger'
 dotnet ef database update --project src/Messenger.Data --startup-project src/Messenger.Server
 ```
+
+### Deploying it
+
+```bash
+cp deploy/.env.example .env        # fill in; .env is gitignored
+docker compose up -d --build
+curl -fsS http://127.0.0.1:8443/health/ready
+```
+
+Migrations are not run by the image — apply them as above first. The `keystore` and
+`filestore` volumes hold state that cannot be rebuilt: **back them up with the database.** A
+systemd unit for non-container hosts is in [`deploy/`](deploy/). Full procedure, including
+backup and restore, is in the [deployment guide](docs/deployment.md).
 
 ## Project status
 

@@ -14,11 +14,16 @@ using System.Threading.RateLimiting;
 var builder = WebApplication.CreateBuilder(args);
 var isProduction = builder.Environment.IsProduction();
 
+// A no-op unless the process is actually running under systemd. When it is, this is what
+// makes `Type=notify` honest: systemd is told the server is ready once it is listening,
+// rather than assuming so the instant exec succeeds, and log output picks up the journal's
+// priority prefixes instead of arriving as undifferentiated text.
+builder.Host.UseSystemd();
+
 builder.Services.AddSignalR();
 builder.Services.AddSingleton<IConnectionRegistry, InMemoryConnectionRegistry>();
 builder.Services.AddSingleton<MessageCipher>();
 builder.Services.AddSingleton<PasswordHasher>();
-builder.Services.AddSingleton<IAuditSigningKeyProvider, InMemoryAuditSigningKeyProvider>();
 builder.Services.AddSingleton(TimeProvider.System);
 
 // The root KEK must outlive the process. Generating one per start would make every
@@ -45,6 +50,21 @@ if (string.IsNullOrWhiteSpace(keyStorePassphrase))
 
 var (keyStore, keyStoreCreated) = FileBackedKeyStore.OpenOrCreate(keyStorePath, keyStorePassphrase);
 builder.Services.AddSingleton<IKeyStoreProvider>(keyStore);
+
+// The audit checkpoint signing key has to outlive the process for the same reason the KEK
+// does, and was previously the one key that did not. A per-process key means every
+// checkpoint signed before a restart names a key id the new process has never held, and its
+// public half is gone -- the signatures stay in the database and can never be checked again.
+// The audit chain would quietly lose its tamper evidence at the first routine restart.
+//
+// Sealed under the same passphrase as the KEK escrow: both are root secrets, provisioned and
+// backed up together, and a second secret to manage is a second secret to lose.
+var auditKeyPath = builder.Configuration["AuditSigningKey:EscrowPath"]
+    ?? Path.Combine(AppContext.BaseDirectory, "keystore", "audit-signing.escrow");
+
+var (auditSigningKeys, auditKeyCreated) =
+    FileBackedAuditSigningKeyProvider.OpenOrCreate(auditKeyPath, keyStorePassphrase);
+builder.Services.AddSingleton<IAuditSigningKeyProvider>(auditSigningKeys);
 
 // Fail fast at startup rather than at the first request. A server that accepts a
 // connection and only then discovers it has no database is far harder to diagnose than
@@ -261,6 +281,15 @@ using (var scope = app.Services.CreateScope())
             "A new root key was created at {Path}. Back up this file and its passphrase now. "
             + "Without them, a restore of the database and file store yields unreadable ciphertext.",
             keyStorePath);
+    }
+
+    if (auditKeyCreated)
+    {
+        app.Logger.LogWarning(
+            "A new audit signing key was created at {Path}. Back it up with the root key. "
+            + "Without it, existing audit checkpoints cannot be verified and the audit chain "
+            + "keeps only its internal consistency, not its proof of origin.",
+            auditKeyPath);
     }
 }
 
