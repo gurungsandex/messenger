@@ -1,0 +1,20 @@
+# Setup-time overlay: publishes PostgreSQL on loopback so tooling on the host can reach it.
+#
+# The base compose file deliberately does not publish the database — it is reachable only
+# from the internal network, so a misconfigured host firewall cannot expose it. But applying
+# migrations and running the bootstrap tool both happen from the host, and both need a
+# connection.
+#
+# Use it only for those steps:
+#
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.setup.yml up -d
+#   ...apply migrations, run the bootstrap tool...
+#   docker compose up -d          # back to the closed configuration
+#
+# Bound to 127.0.0.1 rather than 0.0.0.0, so even while it is published the database is not
+# reachable from the network.
+
+services:
+  postgres:
+    ports:
+      - '127.0.0.1:5432:5432'

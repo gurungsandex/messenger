@@ -30,6 +30,7 @@ compliance archiving possible. It is documented as an accepted risk in the
 
 | Document | Purpose |
 | --- | --- |
+| **[Getting started](docs/getting-started.md)** | **Start here.** Install, run, log in, and a checklist that shows which features work and which are not built. |
 | [Architecture](docs/architecture.md) | Tiers, components, protocols, trust boundaries, auth, crypto, licensing, delivery semantics. |
 | [Data model](docs/data-model.md) | PostgreSQL schema, indexes, retention, migration strategy. |
 | [Threat model](docs/threat-model.md) | Assets, attacker profiles, STRIDE per boundary, mitigations, accepted risks. |
@@ -63,6 +64,7 @@ messenger/
 │   ├── Messenger.Admin.Wpf/       IT admin management console        (not built)
 │   └── Messenger.Owner/           Vendor licensing/telemetry service (not built)
 ├── tests/                         Unit, integration, and end-to-end test projects
+├── tools/Messenger.Bootstrap/     First-run provisioning: evaluation licence, first admin
 ├── deploy/                        systemd unit and config examples   (WiX installers not built)
 ├── Dockerfile                     Container image for the server
 └── docker-compose.yml             Single-host deployment: server, database, volumes
@@ -144,8 +146,15 @@ curl -fsS http://127.0.0.1:8443/health/ready
 
 Migrations are not run by the image — apply them as above first. The `keystore` and
 `filestore` volumes hold state that cannot be rebuilt: **back them up with the database.** A
-systemd unit for non-container hosts is in [`deploy/`](deploy/). Full procedure, including
-backup and restore, is in the [deployment guide](docs/deployment.md).
+systemd unit for non-container hosts is in [`deploy/`](deploy/).
+
+> **A new install cannot let you in.** A freshly migrated database has five roles and no
+> users, and the server refuses every login until a licence is installed — and both fixes sit
+> behind the authenticated admin API. `tools/Messenger.Bootstrap` breaks that cycle by
+> writing the first administrator and an evaluation licence directly. The
+> [getting-started guide](docs/getting-started.md) walks through it.
+
+Full procedure, including backup and restore, is in the [deployment guide](docs/deployment.md).
 
 ## Project status
 
