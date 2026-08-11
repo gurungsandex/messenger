@@ -104,9 +104,20 @@ Migrations are deliberately **not** run by the image or the unit, preserving the
 that an unattended restart must not reshape a production database.
 
 **CI.** A `container` job builds the image, starts it against a real PostgreSQL, and waits for
-`/health/ready` to report healthy. It then restarts the container and **fails the build if
-either key was regenerated** — FR-1's failure mode is silent at runtime, so it is asserted
+`/health/ready` to report healthy. It then **replaces** the container — a new one on the same
+key store volume, which is what an upgrade actually does — and **fails the build if either key
+was created rather than loaded**. FR-1's failure mode is silent at runtime, so it is asserted
 where it cannot be silent.
+
+Replacement rather than restart is deliberate, and the first version of this check got it
+wrong in a way worth recording. It restarted the container and grepped
+`docker logs --since 20s` for the creation warnings. That passes locally, where the container
+has been up for minutes and the first boot's warnings have aged out of the window, and fails
+in CI, where the container is seconds old and its first boot is still inside it — the check
+reported a regenerated key against code that was working correctly. Any window that has to
+exclude a previous boot is a race that a slower or faster runner will lose. A replacement
+container's log starts empty, so a creation warning in it unambiguously belongs to this boot
+and no time window is needed.
 
 ### FR-3 · LOW · The audit signing escrow defaulted into the test binary's directory
 
