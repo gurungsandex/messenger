@@ -31,11 +31,16 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      # Messenger.sln also lists the two WPF projects, which target net8.0-windows and
+      # cannot build on this Linux runner without EnableWindowsTargeting (see the
+      # windows-clients job below, which builds them for real on windows-latest). The
+      # solution filter excludes them so restore/build/test here exercise exactly what
+      # actually runs on Linux -- the server, its libraries, and their tests.
       - name: Restore
-        run: dotnet restore
+        run: dotnet restore Messenger.CrossPlatform.slnf
 
       - name: Build
-        run: dotnet build --no-restore --configuration Release -warnaserror
+        run: dotnet build Messenger.CrossPlatform.slnf --no-restore --configuration Release -warnaserror
 
       # The integration suite is skipped when this is unset, so setting it is what makes
       # the PostgreSQL-specific query translations actually get exercised. Without it the
@@ -43,7 +48,7 @@ jobs:
       - name: Test
         env:
           MESSENGER_TEST_CONNECTION: 'Host=localhost;Port=5432;Database=messenger;Username=postgres;Password=postgres'
-        run: dotnet test --no-build --configuration Release --verbosity normal
+        run: dotnet test Messenger.CrossPlatform.slnf --no-build --configuration Release --verbosity normal
 
       - name: Verify migrations apply to a clean database
         env:
@@ -187,16 +192,17 @@ jobs:
 
           echo 'Both keys loaded from the existing key store.'
 
-  # WPF targets net8.0-windows and cannot compile on a Linux agent. This job is a
-  # placeholder that activates with the Phase 5 client work; it exists now so the
-  # requirement is visible in CI rather than discovered late.
+  # WPF targets net8.0-windows and cannot compile on a Linux agent, so this is the one job
+  # in the workflow that runs on a Windows runner. It proves the two WPF projects compile --
+  # it does not run them; nothing here can click through a login screen or send a chat
+  # message, so this is not a substitute for exercising the apps by hand on a real Windows
+  # machine (see docs/getting-started.md, step 8).
   windows-clients:
     name: Build Windows clients
     runs-on: windows-latest
-    if: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
-      - run: dotnet build src/Messenger.Client.Wpf src/Messenger.Admin.Wpf --configuration Release
+      - run: dotnet build Messenger.sln --configuration Release
