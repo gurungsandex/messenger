@@ -4,11 +4,17 @@ A private, self-hosted corporate IM platform for LAN/WAN/enterprise networks. In
 1:1 chat, group chat, file transfer, and presence, with no cloud dependency and no
 third-party message relay. All customer data stays on customer infrastructure.
 
-> **Status: server-side complete and deployable; Windows packaging not started.** 321 tests
-> pass, including end-to-end HTTP tests and a PostgreSQL-backed integration suite. The server
-> ships with a container image and a systemd unit, both smoke-tested in CI against a real
-> database. The LDAPS binding, SSO, WPF clients, Windows Service host, and MSI installers are
-> **not implemented**. See [What is and isn't built](#what-is-and-isnt-built).
+> **Status: server-side complete, reviewed, and deployable; Owner tier and both WPF apps now
+> written against the tested API; Windows packaging not started.** Tests pass, including
+> end-to-end HTTP tests and a PostgreSQL-backed integration suite. The server ships with a
+> container image and a systemd unit, both smoke-tested in CI against a real database. The
+> Owner tier (vendor licensing/telemetry/support) is a runnable, cross-platform ASP.NET Core
+> service, built and smoke-tested end to end. The Admin console and end-user client are
+> complete WPF applications written against the real REST/SignalR contracts — but WPF only
+> builds and runs on Windows, so **neither has been compiled, run, or exercised by hand**;
+> that verification still needs to happen on a Windows machine. LDAPS binding, Kerberos/NTLM
+> SSO, TPM/DPAPI-NG key stores, the Windows Service host, and MSI installers remain **not
+> implemented**. See [What is and isn't built](#what-is-and-isnt-built).
 
 ## Confirmed decisions
 
@@ -38,6 +44,7 @@ compliance archiving possible. It is documented as an accepted risk in the
 | [Production review](docs/production-review.md) | Concurrency, memory, and deployment findings from the follow-up pass. |
 | [Third review](docs/third-review.md) | A third pass repeating the security and production reviews' own bug classes at call sites they missed. |
 | [Fourth review](docs/fourth-review.md) | A deployment-readiness pass: what breaks when the process is restarted, restored, or run as a service. |
+| [Fifth review](docs/fifth-review.md) | Merging the Owner/WPF work with upstream's bootstrap tool, a security review of the merged surface, and closing the user-lookup gap. |
 | [Error codes](docs/error-codes.md) | Numbered catalog — AUTH/NET/LIC/AD/FILE/SRV — with cause and remediation. |
 | [Deployment guide](docs/deployment.md) | Prerequisites, ports, AD service account, certificates, backup/restore, upgrades, and current status. |
 | [Admin quick reference](docs/quick-reference-admin.md) | One page for daily operations and incidents. |
@@ -47,7 +54,8 @@ compliance archiving possible. It is documented as an accepted risk in the
 ## Repository layout
 
 Projects marked *(not built)* are named here as the target structure; everything else
-exists and is tested.
+exists. Projects marked *(untested)* build and were written against the real, tested API,
+but have not themselves been run or exercised — see the status note above.
 
 ```
 messenger/
@@ -57,18 +65,23 @@ messenger/
 │   ├── Messenger.Core/            Domain model, business rules, no I/O dependencies
 │   ├── Messenger.Crypto/          Envelope encryption, key hierarchy, audit hash chain
 │   ├── Messenger.Data/            EF Core context, entities, migrations
-│   ├── Messenger.Server/          ASP.NET Core host, SignalR hubs, REST admin API
+│   ├── Messenger.Server/          ASP.NET Core host, SignalR hubs, REST admin + conversation + file APIs
 │   ├── Messenger.Licensing/       Licence parsing, Ed25519 verification, grace handling
+│   ├── Messenger.Owner/           Vendor licensing/telemetry/support service (cross-platform, smoke-tested)
 │   ├── Messenger.Server.Service/  Windows Service wrapper            (not built)
-│   ├── Messenger.Client.Wpf/      End-user Windows app               (not built)
-│   ├── Messenger.Admin.Wpf/       IT admin management console        (not built)
-│   └── Messenger.Owner/           Vendor licensing/telemetry service (not built)
+│   ├── Messenger.Client.Wpf/      End-user Windows app               (written, untested — Windows-only)
+│   └── Messenger.Admin.Wpf/       IT admin management console        (written, untested — Windows-only)
 ├── tests/                         Unit, integration, and end-to-end test projects
 ├── tools/Messenger.Bootstrap/     First-run provisioning: evaluation licence, first admin
 ├── deploy/                        systemd unit and config examples   (WiX installers not built)
 ├── Dockerfile                     Container image for the server
 └── docker-compose.yml             Single-host deployment: server, database, volumes
 ```
+
+Two solutions cover different build targets:
+- `Messenger.sln` — everything, including the two WPF projects. Needs a Windows machine.
+- `Messenger.CrossPlatform.slnf` — everything except the WPF projects. Builds and tests on
+  Linux/macOS; this is what `dotnet build`/`dotnet test` below use.
 
 ## Build phases
 
@@ -79,8 +92,8 @@ messenger/
 | 2 | Groups + presence | **Complete** |
 | 3 | File transfer | **Complete** |
 | 4 | Active Directory integration | **Partial** — sync engine complete and tested; LDAPS binding not written |
-| 5 | Admin console | **Partial** — REST API complete and tested; WPF UI not written |
-| 6 | Licensing + support chat | **Partial** — licensing complete and tested; Owner tier not written |
+| 5 | Admin console | **Partial** — REST API complete and tested; WPF console written, untested on Windows |
+| 6 | Licensing + support chat | **Partial** — licensing complete and tested; Owner tier written and smoke-tested |
 | 7 | Installers + documentation | **Partial** — docs complete; container image and systemd unit shipped; MSI installers and Windows service host not written |
 
 Each phase delivers runnable code with tests. Nothing is marked complete while it is a stub.
@@ -102,38 +115,55 @@ Each phase delivers runnable code with tests. Nothing is marked complete while i
 | Directory sync engine, reconciliation rules, RFC 4515/4514 escaping | Built, tested |
 | Licensing: Ed25519 signing, offline validation, read-only grace, enforcement | Built, tested |
 | Admin REST API + SignalR hub | Built, tested |
+| Conversation listing, user directory search, self-service password change, file transfer REST API, group lifecycle routes | Built, tested |
 | RBAC: five seeded roles, per-route permissions, cross-tier escalation refused | Built, tested |
 | Durable root key store with escrow; server refuses to start without a passphrase | Built, tested |
 | Container image and systemd unit, both smoke-tested in CI against a real database | Built, tested |
 | TLS 1.3 enforcement, HSTS, security headers, rate limiting | Built, tested |
+| **Owner tier**: licence issuance/revocation, telemetry ingest, support chat hub | **Built, smoke-tested** — cross-platform ASP.NET Core service (`Messenger.Owner`); own database, own escrowed vendor Ed25519 keypair. First operator account is bootstrapped from `OWNER_BOOTSTRAP_USERNAME`/`OWNER_BOOTSTRAP_PASSWORD` on first start, the same non-network-reachable pattern `tools/Messenger.Bootstrap` uses for the customer server's first admin. |
+| **WPF client** (`Messenger.Client.Wpf`) | **Written, compiles cross-targeted; not run** — login, conversation list, chat, file transfer, presence, forced password change. Starting a direct conversation searches `GET /api/users`, a non-admin directory endpoint added in this pass. |
+| **WPF admin console** (`Messenger.Admin.Wpf`) | **Written, compiles cross-targeted; not run** — dashboard, users, groups (including rename/enable-disable/delete), sessions, audit + chain verification, licence install, directory sync trigger. |
 | **LDAPS wire binding** | **Not built** — engine is complete behind `IDirectoryProvider`; needs a domain controller |
 | **Kerberos / NTLM SSO** | **Not built** — local Argon2id auth works |
 | **DPAPI-NG / TPM / PKCS#11 key stores** | **Not built** — abstraction and escrow complete; shipped provider is development-only |
-| **WPF client and admin console** | **Not built** — all admin logic sits behind the tested REST API |
 | **Windows Service host, MSI installers, code signing** | **Not built** — the server runs as a managed service on Linux via `deploy/messenger-server.service` or the container image |
-| **Owner tier** (activation, telemetry, support chat) | **Not built** — offline licence validation is complete and is all that operation requires |
 
 The server is usable today for **non-domain deployments with local accounts**, driven
-through the REST API and SignalR hub, and it can be deployed and operated as a service — see
-[section 8.1 of the deployment guide](docs/deployment.md). It is **not a turnkey Windows
-product**: no MSI, no Windows service host, no GUI, no working AD binding. The remaining work
-is Windows-specific integration and packaging, not architecture.
+through the REST API, SignalR hub, or either WPF app, and it can be deployed and operated as
+a service — see [section 8.1 of the deployment guide](docs/deployment.md). Compiling the WPF
+apps still requires a Windows machine, and neither has been run — see the status note above.
+It is **not a turnkey Windows product**: no MSI, no Windows service host, no working AD
+binding. The remaining work is Windows-specific integration and packaging, not architecture.
 
 ## Running it
 
 ```bash
-# Requires .NET 8 SDK and PostgreSQL 16
-dotnet build
-dotnet test                        # 270 tests; database-backed tests skip without a connection
+# Requires .NET 8 SDK and PostgreSQL 16. Use the cross-platform solution filter on
+# Linux/macOS — the full Messenger.sln includes the Windows-only WPF projects.
+dotnet build Messenger.CrossPlatform.slnf
+dotnet test Messenger.CrossPlatform.slnf              # skips database-backed tests without a connection
 
-# Include the PostgreSQL-backed suites (51 more: integration + end-to-end HTTP)
+# Include the PostgreSQL-backed suites (integration + end-to-end HTTP)
 export MESSENGER_TEST_CONNECTION='Host=localhost;Port=5432;Database=messenger;Username=postgres;Password=postgres'
-dotnet test                        # 321 tests
+dotnet test Messenger.CrossPlatform.slnf
 
-# Apply the schema. Migrations never run automatically at startup — an unattended
+# Apply the server's schema. Migrations never run automatically at startup — an unattended
 # restart must not reshape a production database.
 export MESSENGER_CONNECTION='Host=localhost;Port=5432;Database=messenger;Username=messenger;Password=messenger'
 dotnet ef database update --project src/Messenger.Data --startup-project src/Messenger.Server
+
+# Apply the Owner tier's schema (a separate database — vendor infrastructure, not part of
+# any customer deployment).
+export MESSENGER_OWNER_CONNECTION='Host=localhost;Port=5432;Database=messenger_owner;Username=messenger;Password=messenger'
+dotnet ef database update --project src/Messenger.Owner --startup-project src/Messenger.Owner
+```
+
+On Windows, with the full solution and the WPF workload installed:
+
+```powershell
+dotnet build Messenger.sln
+dotnet run --project src/Messenger.Client.Wpf     # $env:MESSENGER_SERVER_URL if not https://localhost:8443
+dotnet run --project src/Messenger.Admin.Wpf
 ```
 
 ### Deploying it

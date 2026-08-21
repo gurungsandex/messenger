@@ -97,9 +97,13 @@ public sealed class AuthService(
 
         await audit.AppendAsync("auth.login", "success", user.Id, "client", ip, "user", user.Id, null, ct);
 
-        return user.MustChangePassword
-            ? new AuthResult(false, user, ErrorCode.PasswordChangeRequired)
-            : new AuthResult(true, user, null);
+        // A correct password is a successful login even when MustChangePassword is set --
+        // the caller needs a session to reach POST /api/auth/change-password at all, so
+        // refusing to issue one here would leave every account created via the admin API
+        // permanently unable to sign in. LoginResponse.MustChangePassword is how the caller
+        // is told to change it, and every other authenticated route refuses the session
+        // until they do -- see AdminAuthFilter.
+        return new AuthResult(true, user, null);
     }
 
     public async Task SetPasswordAsync(

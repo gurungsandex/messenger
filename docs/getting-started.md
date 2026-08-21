@@ -55,12 +55,14 @@ Run the test suite first. It takes about 90 seconds and tells you whether the pr
 environment or the code, which is worth knowing before anything is containerised.
 
 ```bash
-dotnet build
-dotnet test
+dotnet build Messenger.CrossPlatform.slnf
+dotnet test Messenger.CrossPlatform.slnf
 ```
 
-Expect **270 passing, 51 skipped**. The skipped ones need a database and are covered in
-step 7.
+Expect **270 passing, 61 skipped**. The skipped ones need a database and are covered in
+step 7. (`Messenger.CrossPlatform.slnf` excludes the two Windows-only WPF projects — see
+[step 8](#step-8-windows-only-run-the-wpf-apps) if you have a Windows machine and want to run
+those too.)
 
 ---
 
@@ -290,18 +292,77 @@ Returns a connection token and the available transports. Sending messages needs 
 client — there is no shipped client, so this confirms the endpoint is live, not that you can
 chat from a UI.
 
+### Works: conversation listing, user directory, and file transfer
+
+```bash
+curl -s "${AUTH[@]}" http://127.0.0.1:8443/api/conversations      # → [] on a fresh install
+
+curl -s "${AUTH[@]}" http://127.0.0.1:8443/api/users               # → other active users, minus you
+curl -s "${AUTH[@]}" 'http://127.0.0.1:8443/api/users?q=ali'       # → filtered by username/display name
+
+# File transfer needs an existing conversation id -- open one first (e.g. by having two users
+# message each other over the chat hub), then:
+curl -s -X POST "${AUTH[@]}" \
+  -d '{"conversationId":"<id>","fileName":"test.txt","sizeBytes":4,
+       "sha256PlaintextBase64":"<base64 sha256 of the 4 bytes>","contentType":"text/plain"}' \
+  http://127.0.0.1:8443/api/files                                  # → 201 Created
+```
+
+### Works: self-service password change
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "${AUTH[@]}" \
+  -d '{"currentPassword":"choose-a-long-password","newPassword":"an-even-longer-replacement"}' \
+  http://127.0.0.1:8443/api/auth/change-password    # → 204; every session for this user is revoked, log in again
+```
+
 ### Not built: everything below fails on purpose
 
 ```bash
 curl -s -X POST "${AUTH[@]}" http://127.0.0.1:8443/api/admin/directory/sync
 # → 502  AD-101 "the LDAPS provider is not yet implemented"
-
-curl -s -o /dev/null -w '%{http_code}\n' -X POST "${AUTH[@]}" http://127.0.0.1:8443/api/files
-# → 404  file transfer has no HTTP route
-
-curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8443/api/auth/password
-# → 404  no password-change endpoint
 ```
+
+---
+
+## Step 8 — Windows only: run the WPF apps
+
+`Messenger.Client.Wpf` and `Messenger.Admin.Wpf` are complete applications written against
+every route exercised in step 7, but WPF only builds and runs on Windows — nothing before this
+step needed one. This step needs:
+
+- A Windows 10 1809+ / 11 / Server 2019+ machine with the **.NET 8 SDK** and the
+  **.NET Desktop Development** workload (installed via Visual Studio Installer, or
+  `winget install Microsoft.DotNet.SDK.8` plus the workload from `dotnet workload`).
+- The server from steps 1–6 reachable from that machine — either running on the same box, or
+  reachable over the network at whatever host:port you publish `8443` on.
+
+```powershell
+git clone https://github.com/gurungsandex/messenger.git
+cd messenger
+dotnet build Messenger.sln
+
+$env:MESSENGER_SERVER_URL = "https://localhost:8443"    # omit if the server is on this same machine
+dotnet run --project src/Messenger.Client.Wpf
+dotnet run --project src/Messenger.Admin.Wpf
+```
+
+Log in as the accounts from steps 4/5/7 (`admin` for the console, `alice`/`bob` for the
+client). Confirm at minimum:
+
+- Login, and — for an account seeded with `--role User` via the bootstrap tool, which is
+  created without the must-change-password flag — a normal sign-in straight into the shell.
+- The client's "start direct chat" search box returns real users from `GET /api/users`
+  (added in the [fifth review](fifth-review.md)) rather than requiring a pasted id.
+- A message sent from one client instance is received live by another logged in as the peer.
+- A file attached in the client downloads byte-identical on the receiving side.
+- In the admin console: create a user, rename a group, disable/re-enable a group, and confirm
+  the audit log shows each action.
+
+This is the one verification step in the whole project that cannot be done from this
+repository's own environment — see the [fifth review](fifth-review.md) for exactly what
+changed since the WPF apps were written, and report back what you find. A failure here is
+useful information: it is the first time this code has been exercised by hand.
 
 ---
 
@@ -315,14 +376,13 @@ not of this guide.
 | Gap | What you see | Workaround |
 | --- | --- | --- |
 | **No first-admin provisioning** | A new install rejects every login, with nothing indicating why | The bootstrap tool in step 4 |
-| **Users created via the API cannot log in** | `POST /api/admin/users` returns 201, then that user's login fails with `AUTH-106` | Accounts are flagged must-change-password and **no password-change endpoint exists**. Create usable accounts with the bootstrap tool and `--role User` |
-| **No client application** | Nothing to click | The REST API and SignalR hub are the only interfaces. WPF clients are not built |
+| **Users created via the API must change their password before anything else works** | `POST /api/admin/users` returns 201, then that user's first login returns `mustChangePassword: true` and every other route refuses them until it is cleared | Call `POST /api/auth/change-password` once, using the initial password as `currentPassword`. See step 7 |
+| **WPF client and admin console are written but unverified** | Both apps compile (cross-targeted on Linux/macOS, natively on Windows) but have not been run by hand | See [step 8](#step-8-windows-only-run-the-wpf-apps) — needs a Windows machine |
 
-### Built and tested, but not reachable
+### Built and tested, but not reachable from Linux/macOS
 
 | Gap | Status |
 | --- | --- |
-| **File transfer** | The service is complete and tested — chunked, resumable, encrypted, crypto-shred delete — but no HTTP or hub route reaches it, so it cannot be used |
 | **Hub rate limiting** | HTTP endpoints are rate limited; SignalR methods are not |
 
 ### Not implemented
@@ -332,8 +392,7 @@ not of this guide.
 | **LDAPS / Active Directory** | The sync engine is complete and tested behind an interface; the wire binding needs a real domain controller. Returns `AD-101` |
 | **Kerberos / NTLM SSO** | Local password auth only |
 | **TPM / DPAPI-NG / HSM key store** | The shipped file-backed store is durable and correct but keeps the key in process memory. It is a development provider |
-| **Windows Service host, MSI installers** | Not built. Linux container and systemd unit are the supported ways to run it |
-| **Owner tier** (activation, telemetry, support chat) | Not built. Offline licence validation is complete and is all that operation requires |
+| **Windows Service host, MSI installers, code signing** | Not built. Linux container and systemd unit are the supported ways to run the server |
 
 ### Known issues carried forward
 
@@ -364,7 +423,7 @@ end-to-end encrypted. See [ADR-0002](adr/0002-encryption-model.md) and the
 | `SRV-102: 'KeyStore:Passphrase' is not configured` during `dotnet ef` | **Normal.** The tool has no server environment. Migrations still apply — check for `Done.` |
 | Every login gives `LIC-101` | `VENDOR_PUBLIC_KEY` does not match the installed licence. Re-run step 4 and restart the server |
 | Every login gives `LIC-108` | No licence installed. Run the bootstrap tool without `--skip-license` |
-| Login gives `AUTH-106` | The account is flagged must-change-password. There is no endpoint to clear it — recreate the account with the bootstrap tool |
+| Every route except login and change-password gives `AUTH-106` | The session belongs to an account flagged must-change-password (true for every account created via `POST /api/admin/users`). Login itself still succeeds and returns `"mustChangePassword": true` — call `POST /api/auth/change-password` with the initial password as `currentPassword` before doing anything else, then log in again |
 | Admin call gives `AUTH-205` | Missing, expired, or mismatched session. Both headers are required and the device fingerprint must match the login. Sessions idle out after 15 minutes |
 | Admin call gives `AUTH-301` | Authenticated but not permitted. Expected for non-admin accounts |
 | `dotnet ef` cannot connect | The setup overlay is not applied, or a local PostgreSQL is occupying 5432 |
@@ -391,6 +450,6 @@ permanently unreadable, whatever your database backups say.
 | --- | --- |
 | Deploy for real — TLS, backups, hardening | [Deployment guide](deployment.md) |
 | Understand the design | [Architecture](architecture.md) · [ADRs](adr/) |
-| Know what was reviewed and fixed | [Fourth review](fourth-review.md) and the three before it |
+| Know what was reviewed and fixed | [Fifth review](fifth-review.md) and the four before it |
 | Look up an error code | [Error codes](error-codes.md) |
 | Run day-to-day operations | [Admin quick reference](quick-reference-admin.md) |

@@ -1,0 +1,17 @@
+{
+  "solution": {
+    "path": "Messenger.sln",
+    "projects": [
+      "src\\Messenger.Contracts\\Messenger.Contracts.csproj",
+      "src\\Messenger.Core\\Messenger.Core.csproj",
+      "src\\Messenger.Crypto\\Messenger.Crypto.csproj",
+      "src\\Messenger.Data\\Messenger.Data.csproj",
+      "src\\Messenger.Licensing\\Messenger.Licensing.csproj",
+      "src\\Messenger.Owner\\Messenger.Owner.csproj",
+      "src\\Messenger.Server\\Messenger.Server.csproj",
+      "tests\\Messenger.Core.Tests\\Messenger.Core.Tests.csproj",
+      "tests\\Messenger.Crypto.Tests\\Messenger.Crypto.Tests.csproj",
+      "tests\\Messenger.Server.Tests\\Messenger.Server.Tests.csproj"
+    ]
+  }
+}
