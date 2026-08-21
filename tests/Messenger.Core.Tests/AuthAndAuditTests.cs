@@ -74,8 +74,14 @@ public class AuthenticationTests
         Assert.Equal(ErrorCode.InvalidCredentials, result.ErrorCode);
     }
 
+    /// <summary>
+    /// A correct password succeeds even when MustChangePassword is set -- the caller needs a
+    /// session to reach the change-password route at all. It is on the caller (the login
+    /// endpoint's response, then AdminAuthFilter on every other route) to act on the flag,
+    /// not on AuthenticateAsync to refuse the login outright.
+    /// </summary>
     [Fact]
-    public async Task Signals_a_forced_password_change_rather_than_signing_in()
+    public async Task Succeeds_but_leaves_the_forced_password_change_flag_for_the_caller_to_act_on()
     {
         using var h = new TestHarness();
         var user = h.AddUser("alice", GoodPassword);
@@ -84,8 +90,8 @@ public class AuthenticationTests
 
         var result = await h.Auth.AuthenticateAsync("alice", GoodPassword);
 
-        Assert.False(result.Succeeded);
-        Assert.Equal(ErrorCode.PasswordChangeRequired, result.ErrorCode);
+        Assert.True(result.Succeeded);
+        Assert.True(result.User!.MustChangePassword);
     }
 
     [Fact]

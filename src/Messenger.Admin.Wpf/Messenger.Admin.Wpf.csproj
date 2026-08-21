@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    WPF only builds and runs on Windows: this project cannot be compiled, run, or tested on
+    the Linux/macOS host this repository was otherwise developed against in this pass. Build
+    it and run it from a Windows machine with the .NET 8 SDK and the WPF workload:
+      dotnet run ‑‑project src/Messenger.Admin.Wpf
+    It was written against the server's real, tested admin REST API (AdminApi.cs), including
+    the group lifecycle routes added alongside it, but every screen needs to be exercised by
+    hand on Windows before it is trusted.
+  -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Messenger.Contracts\Messenger.Contracts.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.3.2" />
+  </ItemGroup>
+
+</Project>

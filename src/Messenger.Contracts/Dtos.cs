@@ -14,6 +14,8 @@ public sealed record LoginRequest(
     string DeviceFingerprint,
     string? DeviceName);
 
+public sealed record ChangePasswordRequest(string CurrentPassword, string NewPassword);
+
 public sealed record LoginResponse(
     string SessionToken,
     Guid UserId,
@@ -74,6 +76,13 @@ public sealed record PresenceDto(
     DateTimeOffset ChangedAt);
 
 public sealed record ErrorDto(string Code, string Message, string? CorrelationId);
+
+/// <summary>
+/// A directory entry visible to any authenticated user for the purpose of starting a direct
+/// conversation. Deliberately minimal -- no email, role, or status -- since this is reachable
+/// by any signed-in user, not just admins.
+/// </summary>
+public sealed record UserDirectoryEntryDto(Guid UserId, string Username, string DisplayName);
 
 /// <summary>Server-to-client hub calls. Implemented by the client, invoked by the server.</summary>
 public interface IChatClient

@@ -186,6 +186,34 @@ public static class AdminApi
             return Results.NoContent();
         }), Permissions.GroupsMembership);
 
+        Require(admin.MapPut("/groups/{id:guid}", async (
+            Guid id, RenameGroupRequest request, GroupService groups, HttpContext http, CancellationToken ct) =>
+        {
+            await groups.RenameAsync(id, request.Name, http.ActorId(), ct);
+            return Results.NoContent();
+        }), Permissions.GroupsManage);
+
+        Require(admin.MapPost("/groups/{id:guid}/status", async (
+            Guid id, SetStatusRequest request, GroupService groups, HttpContext http, CancellationToken ct) =>
+        {
+            if (!Enum.TryParse<GroupStatus>(request.Status, ignoreCase: true, out var target)
+                || !Enum.IsDefined(target))
+            {
+                return Problem(ErrorCode.MalformedRequest,
+                    $"Status must be one of: {string.Join(", ", Enum.GetNames<GroupStatus>())}.");
+            }
+
+            await groups.SetStatusAsync(id, target, http.ActorId(), ct);
+            return Results.NoContent();
+        }), Permissions.GroupsManage);
+
+        Require(admin.MapDelete("/groups/{id:guid}", async (
+            Guid id, GroupService groups, HttpContext http, CancellationToken ct) =>
+        {
+            await groups.DeleteAsync(id, http.ActorId(), ct);
+            return Results.NoContent();
+        }), Permissions.GroupsManage);
+
         // ---- Directory sync ----------------------------------------------------------
 
         Require(admin.MapPost("/directory/sync", async (
@@ -367,6 +395,7 @@ public sealed record AuditEntrySummary(long Id, DateTimeOffset OccurredAt, Guid?
 public sealed record CreateUserRequest(string Username, string DisplayName, string? Email, string InitialPassword);
 public sealed record SetStatusRequest(string Status);
 public sealed record CreateGroupRequest(string Name, string? Description);
+public sealed record RenameGroupRequest(string Name);
 public sealed record InstallLicenseRequest(string LicenseFile);
 
 /// <summary>
@@ -393,6 +422,15 @@ public sealed class AdminAuthFilter(SessionService sessions) : IEndpointFilter
             return Results.Json(new ErrorDto(validation.ErrorCode ?? ErrorCode.SessionTokenInvalid,
                     "Authentication failed.", null),
                 statusCode: StatusCodes.Status401Unauthorized);
+
+        // A session can exist for an account flagged must-change-password -- login issues one
+        // deliberately, since without a session the caller could never reach
+        // POST /api/auth/change-password to clear the flag. Every route this filter gates is
+        // not that route, so all of them refuse until the password is changed.
+        if (validation.Session.User.MustChangePassword)
+            return Results.Json(new ErrorDto(ErrorCode.PasswordChangeRequired,
+                    "This account must change its password before it can do anything else.", null),
+                statusCode: StatusCodes.Status403Forbidden);
 
         http.Items["ActorId"] = validation.Session.UserId;
         return await next(context);

@@ -1,0 +1,8 @@
+<Window x:Class="Messenger.Client.Wpf.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Messenger" Height="720" Width="1100" MinHeight="480" MinWidth="720">
+    <Grid>
+        <ContentControl Content="{Binding CurrentView}" />
+    </Grid>
+</Window>

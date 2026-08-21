@@ -304,6 +304,8 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
 });
 app.MapHub<ChatHub>("/hubs/chat");
 app.MapAdminApi();
+app.MapConversationApi();
+app.MapFileApi();
 
 app.MapPost("/api/auth/login", async (
     LoginRequest request, AuthService auth, SessionService sessions,
@@ -317,12 +319,8 @@ app.MapPost("/api/auth/login", async (
         // Every AUTH-1xx collapses to one generic message here. The precise code is in the
         // audit log and the admin console; returning it to an unauthenticated caller would
         // be a free account-enumeration oracle.
-        var code = result.ErrorCode == ErrorCode.PasswordChangeRequired
-            ? ErrorCode.PasswordChangeRequired
-            : ErrorCode.InvalidCredentials;
-
         return Results.Json(
-            new ErrorDto(code, "Sign-in failed. Check your username and password.", null),
+            new ErrorDto(ErrorCode.InvalidCredentials, "Sign-in failed. Check your username and password.", null),
             statusCode: StatusCodes.Status401Unauthorized);
     }
 
@@ -368,6 +366,38 @@ app.MapPost("/api/auth/logout", async (
 // knows who is calling, so leaving it open makes it the cheapest unauthenticated way to put
 // load on the database.
 .RequireRateLimiting("admin");
+
+// Self-service change-password. LoginResponse.MustChangePassword has signalled this need
+// since the field was added; this is what a client calls in response to it, and what any
+// user calls to rotate their own password on their own schedule. Admin-initiated resets
+// remain the account-creation-only path in AdminApi.cs -- this route only ever acts on the
+// caller's own account, verified against their current password, never another user's.
+app.MapPost("/api/auth/change-password", async (
+    ChangePasswordRequest request, HttpContext http, MessengerDbContext db,
+    PasswordHasher hasher, AuthService auth, SessionService sessions, CancellationToken ct) =>
+{
+    var token = http.Request.Headers["X-Session-Token"].FirstOrDefault();
+    var device = http.Request.Headers["X-Device-Fingerprint"].FirstOrDefault();
+    if (string.IsNullOrEmpty(token) || string.IsNullOrEmpty(device))
+        return Results.Json(new ErrorDto(ErrorCode.SessionTokenInvalid, "Authentication required.", null),
+            statusCode: StatusCodes.Status401Unauthorized);
+
+    var validation = await sessions.ValidateAsync(token, device, SessionPolicy.Default, ct);
+    if (!validation.IsValid || validation.Session is null)
+        return Results.Json(new ErrorDto(validation.ErrorCode ?? ErrorCode.SessionTokenInvalid,
+                "Authentication failed.", null),
+            statusCode: StatusCodes.Status401Unauthorized);
+
+    var user = await db.Users.FirstAsync(u => u.Id == validation.Session.UserId, ct);
+    if (user.PasswordHash is null || !hasher.Verify(request.CurrentPassword, user.PasswordHash).Succeeded)
+        return Results.Json(new ErrorDto(ErrorCode.InvalidCredentials, "Current password is incorrect.", null),
+            statusCode: StatusCodes.Status401Unauthorized);
+
+    // Every session including this one is revoked as part of the change, so the caller must
+    // log in again with the new password -- the same behaviour an admin-forced reset has.
+    await auth.SetPasswordAsync(user, request.NewPassword, sessions, ct);
+    return Results.NoContent();
+}).RequireRateLimiting("admin");
 
 app.Run();
 

@@ -332,6 +332,41 @@ public sealed class MessageService(
         return receiptsEnabled;
     }
 
+    /// <summary>
+    /// Conversations the user currently participates in, most recently active first. This is
+    /// how a client discovers what to open — <see cref="OpenDirectConversation"/> and group
+    /// membership create conversations, but nothing previously read them back as a list.
+    /// </summary>
+    public async Task<IReadOnlyList<ConversationDto>> GetConversationsForUserAsync(
+        Guid userId, CancellationToken ct = default)
+    {
+        var rows = await db.ConversationParticipants
+            .Where(p => p.UserId == userId && p.LeftAt == null)
+            .Join(db.Conversations, p => p.ConversationId, c => c.Id, (p, c) => new { p, c })
+            .OrderByDescending(x => x.c.LastMessageAt)
+            .ToListAsync(ct);
+
+        // Group conversations carry their own title; a direct conversation's "title" is the
+        // other participant's display name, which requires a lookup this query doesn't do by
+        // default -- Participants is only populated when explicitly loaded, so it is here.
+        var directRows = rows.Where(x => x.c.Type == ConversationType.Direct).ToList();
+        var directConversationIds = directRows.Select(x => x.c.Id).ToList();
+        var peerNames = await db.ConversationParticipants
+            .Where(p => directConversationIds.Contains(p.ConversationId) && p.UserId != userId)
+            .Join(db.Users, p => p.UserId, u => u.Id, (p, u) => new { p.ConversationId, u.DisplayName })
+            .ToDictionaryAsync(x => x.ConversationId, x => x.DisplayName, ct);
+
+        return rows.Select(x => new ConversationDto(
+            x.c.Id,
+            x.c.Type,
+            x.c.Type == ConversationType.Direct
+                ? peerNames.GetValueOrDefault(x.c.Id, "(unknown)")
+                : x.c.Title ?? "(unnamed group)",
+            x.c.NextSeq - 1,
+            x.p.LastReadSeq,
+            x.c.LastMessageAt)).ToList();
+    }
+
     public async Task<IReadOnlyList<Guid>> GetParticipantIdsAsync(Guid conversationId, CancellationToken ct = default)
         => await db.ConversationParticipants
             .Where(p => p.ConversationId == conversationId && p.LeftAt == null)

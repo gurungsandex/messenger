@@ -37,10 +37,7 @@ if (arguments.ContainsKey("help") || args.Length == 0)
           --admin-username <name>   Default: admin
           --admin-display <name>    Default: the username
           --role <name>             Role to grant. Default: ServerAdmin. Use 'User' to make
-                                    an ordinary account for testing chat -- accounts created
-                                    through the admin API cannot sign in yet, because they
-                                    are flagged must-change-password and no password-change
-                                    endpoint exists.
+                                    an ordinary account for testing chat.
           --customer <name>         Licence holder name. Default: Evaluation
           --seats <n>               Default: 25
           --days <n>                Licence validity in days. Default: 90
@@ -169,9 +166,9 @@ if (!skipAdmin)
         PasswordHash = hasher.Hash(password),
         PasswordUpdatedAt = DateTimeOffset.UtcNow,
 
-        // Deliberately false. The server refuses a login that must change its password, and
-        // the password-change endpoint is not wired up yet, so requiring it here would
-        // produce an administrator who cannot sign in.
+        // Deliberately false so the first login does not require a password change before
+        // the administrator has done anything -- they can change it via
+        // POST /api/auth/change-password whenever they choose.
         MustChangePassword = false,
         CreatedAt = DateTimeOffset.UtcNow,
     };

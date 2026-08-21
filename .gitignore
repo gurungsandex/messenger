@@ -53,3 +53,6 @@ Thumbs.db
 
 # Local dev database
 pgdata/
+
+# Local scratch run data (dev key stores, uploaded files, server logs)
+.rundata/
